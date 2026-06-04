@@ -4,8 +4,8 @@ import { hashPassword, verifyPassword, signToken } from '../services/auth.servic
 import { parseBody, RegisterSchema, LoginSchema } from '../lib/validate';
 
 const authRoutes: FastifyPluginAsync = async (fastify) => {
-  // Create org + owner account
-  fastify.post('/register', async (req, reply) => {
+  // Create org + owner account — 5 registrations per hour per IP
+  fastify.post('/register', { config: { rateLimit: { max: 5, timeWindow: 60 * 60 * 1000 } } }, async (req, reply) => {
     const body = parseBody(RegisterSchema, req.body);
     const email = body.email.trim().toLowerCase();
 
@@ -27,8 +27,8 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.status(201).send({ token, orgId: org.id, userId: user.id });
   });
 
-  // Login
-  fastify.post('/login', async (req, reply) => {
+  // Login — 10 attempts per 15 minutes per IP
+  fastify.post('/login', { config: { rateLimit: { max: 10, timeWindow: 15 * 60 * 1000 } } }, async (req, reply) => {
     const body = parseBody(LoginSchema, req.body);
     const email = body.email.trim().toLowerCase();
 

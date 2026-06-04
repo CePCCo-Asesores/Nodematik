@@ -1,14 +1,47 @@
 import { Worker } from 'bullmq';
-import { redisConnection, MESSAGE_QUEUE, dlq } from './queue';
+import { redisConnection, MESSAGE_QUEUE, dlq, messageQueue } from './queue';
 import { processInboundMessage } from '../services/conversation.service';
+import { getPubClient } from '../lib/pubsub';
 import { logger } from '../logger';
 import type { InboundMessageJob } from '../types';
+
+// Separate Redis client for conversation mutex operations (not in subscriber mode)
+const redis = getPubClient();
+
+const MAX_LOCK_RETRIES = 5;
+const LOCK_TTL_MS = 90_000; // matches lockDuration — auto-expires if worker crashes
+const LOCK_RETRY_BASE_MS = 2_000;
 
 export function startWorker(): Worker {
   const worker = new Worker<InboundMessageJob>(
     MESSAGE_QUEUE,
     async (job) => {
-      await processInboundMessage(job.data);
+      const lockKey = `conv:${job.data.phoneId}`;
+      const lockToken = job.id!;
+
+      // Per-conversation mutex — ensures messages from the same phone are
+      // processed in order even with worker concurrency > 1.
+      // ioredis v5 SET argument order: key, value, 'PX', ttl, 'NX'
+      const acquired = await redis.set(lockKey, lockToken, 'PX', LOCK_TTL_MS, 'NX');
+      if (!acquired) {
+        const lockRetries = (job.data.lockRetries ?? 0) + 1;
+        if (lockRetries <= MAX_LOCK_RETRIES) {
+          await messageQueue.add('process', { ...job.data, lockRetries }, {
+            delay: LOCK_RETRY_BASE_MS * lockRetries,
+          });
+        } else {
+          logger.warn({ jobId: job.id, phoneId: job.data.phoneId }, 'conversation lock: max retries exceeded, dropping job');
+        }
+        return; // current job is done — work was rescheduled (or dropped)
+      }
+
+      try {
+        await processInboundMessage(job.data);
+      } finally {
+        // Release only if we still own the lock (guards against TTL expiry + reacquire)
+        const owner = await redis.get(lockKey);
+        if (owner === lockToken) await redis.del(lockKey);
+      }
     },
     {
       connection: redisConnection,

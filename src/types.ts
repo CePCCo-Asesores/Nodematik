@@ -34,6 +34,7 @@ export interface InboundMessageJob {
     title: string;
   };
   timestamp: number;
+  lockRetries?: number; // incremented each time the job is rescheduled due to a conversation lock
 }
 
 // ─── LLM provider interface ───────────────────────────────────────────────────

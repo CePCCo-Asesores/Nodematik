@@ -194,19 +194,26 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   fastify.put<{ Params: { id: string; cmdId: string } }>('/:id/commands/:cmdId', { preHandler: [requirePermission('bot:update-commands')] }, async (req, reply) => {
+    const { id, cmdId } = req.params;
+    const existing = await db.botCommand.findUnique({ where: { id: cmdId }, select: { botId: true } });
+    if (!existing || existing.botId !== id) return reply.status(404).send({ error: 'Command not found' });
+
     const body = parseBody(CommandSchema.partial(), req.body);
     const updateData: Prisma.BotCommandUpdateInput = {};
     if (body.trigger !== undefined) updateData.trigger = body.trigger;
     if (body.responseType !== undefined) updateData.responseType = body.responseType;
     if (body.payload !== undefined) updateData.payload = body.payload as Prisma.InputJsonValue;
-    const cmd = await db.botCommand.update({ where: { id: req.params.cmdId }, data: updateData });
-    invalidateBotCache(req.params.id);
+    const cmd = await db.botCommand.update({ where: { id: cmdId }, data: updateData });
+    invalidateBotCache(id);
     return reply.send(cmd);
   });
 
   fastify.delete<{ Params: { id: string; cmdId: string } }>('/:id/commands/:cmdId', { preHandler: [requirePermission('bot:update-commands')] }, async (req, reply) => {
-    await db.botCommand.delete({ where: { id: req.params.cmdId } });
-    invalidateBotCache(req.params.id);
+    const { id, cmdId } = req.params;
+    const existing = await db.botCommand.findUnique({ where: { id: cmdId }, select: { botId: true } });
+    if (!existing || existing.botId !== id) return reply.status(404).send({ error: 'Command not found' });
+    await db.botCommand.delete({ where: { id: cmdId } });
+    invalidateBotCache(id);
     return reply.status(204).send();
   });
 

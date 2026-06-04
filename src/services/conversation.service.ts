@@ -32,7 +32,12 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
 
   const { bot } = channelWithBot;
   const channel = channelWithBot;
-  if (bot.status === 'paused') return;
+
+  // Only 'active' bots process messages — 'draft', 'paused', 'credential_error' are all silent
+  if (bot.status !== 'active') return;
+
+  // Only route messages through connected channels
+  if (channel.status !== 'connected') return;
 
   const channelCreds = decryptJson<MetaCloudCredentials>(channel.credentials);
   const channelProvider = getChannelProvider(channel.provider);
