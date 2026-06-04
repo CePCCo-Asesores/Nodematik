@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { db } from '../../db';
 import { invalidateBotCache } from '../../services/bot.service';
-import { generateEmbedding, encodeEmbedding } from '../../services/knowledge.service';
+import { generateEmbedding, encodeEmbedding, saveEmbeddingVector } from '../../services/knowledge.service';
 import { decrypt, decryptJson } from '../../crypto';
 import { requirePermission } from '../../lib/rbac';
 import { parseBody, KnowledgeSchema, UpdateKnowledgeSchema } from '../../lib/validate';
@@ -84,6 +84,9 @@ const knowledgeRoutes: FastifyPluginAsync = async (fastify) => {
           where: { id: entry.id },
           data: { embeddingData: encodeEmbedding(vec), hasEmbedding: true },
         });
+        // Best-effort: populate pgvector column for ANN search; falls back to
+        // in-process cosine similarity if pgvector is not installed.
+        await saveEmbeddingVector(entry.id, vec).catch(() => { /* pgvector unavailable */ });
         updated++;
       } catch {
         failed++;

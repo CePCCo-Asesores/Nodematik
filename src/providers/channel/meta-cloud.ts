@@ -1,4 +1,5 @@
 import type { ChannelProvider } from './types';
+import { recordMetaError } from '../../services/metrics.service';
 import type {
   ParsedWebhook,
   InboundMessage,
@@ -90,6 +91,7 @@ export class MetaCloudProvider implements ChannelProvider {
       const text = await res.text().catch(() => '');
       const err = new MetaApiError(`Meta API error ${res.status}: ${text}`);
       err.statusCode = res.status;
+      recordMetaError(res.status);
       throw err;
     }
   }

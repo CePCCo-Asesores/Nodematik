@@ -25,9 +25,20 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    build: .
+    command: node dist/migrate.js
+    restart: "no"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://chatbox:chatbox@db:5432/chatbox
+    depends_on:
+      db:
+        condition: service_healthy
+
   app:
     build: .
-    command: sh -c "npx prisma migrate deploy && node dist/server.js"
+    command: node dist/server.js
     ports:
       - "3000:3000"
     env_file: .env
@@ -39,6 +50,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   worker:
     build: .

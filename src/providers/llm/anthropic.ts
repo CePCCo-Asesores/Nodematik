@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { LLMProvider } from './types';
 import { LLMCredentialError, LLMRateLimitError } from './types';
+import { recordLLMUsage, recordLLMError } from '../../services/metrics.service';
 import type { LLMCompletionInput, LLMCompletionOutput } from '../../types';
 
 export class AnthropicProvider implements LLMProvider {
@@ -15,6 +16,7 @@ export class AnthropicProvider implements LLMProvider {
       { role: 'user', content: input.userMessage },
     ];
 
+    const startMs = Date.now();
     let response: Anthropic.Message;
     try {
       response = await client.messages.create({
@@ -25,19 +27,17 @@ export class AnthropicProvider implements LLMProvider {
         temperature: input.params?.temperature as number | undefined,
       });
     } catch (err) {
+      recordLLMError('anthropic', err instanceof Anthropic.RateLimitError ? 'rate_limit' : 'api_error');
       throw translateError(err);
     }
 
-    const text =
-      response.content.find(b => b.type === 'text')?.text ?? '';
+    const durationMs = Date.now() - startMs;
+    const inputTokens = response.usage.input_tokens;
+    const outputTokens = response.usage.output_tokens;
+    recordLLMUsage('anthropic', input.model, durationMs, inputTokens, outputTokens);
 
-    return {
-      text,
-      usage: {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
-      },
-    };
+    const text = response.content.find(b => b.type === 'text')?.text ?? '';
+    return { text, usage: { inputTokens, outputTokens } };
   }
 }
 

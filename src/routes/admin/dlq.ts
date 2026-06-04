@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { dlq, messageQueue } from '../../queue/queue';
+import { updateDLQDepth } from '../../services/metrics.service';
 
 // DLQ management — superadmin only.
 // Jobs land here after exhausting all retries on the main queue.
@@ -44,6 +45,7 @@ const dlqRoutes: FastifyPluginAsync = async (fastify) => {
       backoff: { type: 'exponential', delay: 2000 },
     });
     await job.remove();
+    dlq.getWaitingCount().then(updateDLQDepth).catch(() => { /* non-critical */ });
 
     return reply.send({ requeued: true, jobId: req.params.jobId });
   });
@@ -53,6 +55,7 @@ const dlqRoutes: FastifyPluginAsync = async (fastify) => {
     const job = await dlq.getJob(req.params.jobId);
     if (!job) return reply.status(404).send({ error: 'Job not found in DLQ' });
     await job.remove();
+    dlq.getWaitingCount().then(updateDLQDepth).catch(() => { /* non-critical */ });
     return reply.status(204).send();
   });
 };

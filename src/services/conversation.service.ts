@@ -10,6 +10,7 @@ import { notifyCredentialError, notifyLLMFailure } from './notification.service'
 import * as consentService from './consent.service';
 import { getRelevantKnowledge } from './knowledge.service';
 import { tryIncrementQuota } from './quota.service';
+import { recordQuotaBlock, recordSafetyBlock, recordMessageProcessed } from './metrics.service';
 import { downloadMedia } from './media.service';
 import { getLLMProvider, LLMCredentialError, LLMRateLimitError } from '../providers/llm';
 import { getChannelProvider } from '../providers/channel';
@@ -114,6 +115,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   // ── Step 6: SafetyClassifier on INPUT (full async check with LLM tier) ──
   const inputSafety = await safetyClassifier.classifyAsync(inputText, bot.safetyLevel as SafetyLevel);
   if (inputSafety.isCrisis) {
+    recordSafetyBlock('input_detected');
     await handleCrisis(bot.id, bot.crisisConfig, endUser.id, channelProvider, channel.phoneId, channelCreds, job.from, inputSafety, 'input_detected');
     return;
   }
@@ -129,6 +131,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
     return;
   }
   if (!withinQuota) {
+    recordQuotaBlock();
     await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: 'El servicio ha alcanzado su límite mensual de mensajes. Contacta al administrador.', apiVersion: config.META_API_VERSION });
     return;
   }
@@ -136,7 +139,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   // ── Step 7: History + knowledge ──────────────────────────────────────────
   const history = await getHistory(bot.id, endUser.id, bot.historyWindow);
   const embedderKey = resolveEmbedderKey(bot.integrations, bot.llmProvider ?? '', bot.llmApiKeyEnc);
-  const knowledge = await getRelevantKnowledge(bot.knowledge, inputText, embedderKey);
+  const knowledge = await getRelevantKnowledge(bot.id, bot.knowledge, inputText, embedderKey);
 
   // ── Step 8: LLM (client's provider + client's key) ───────────────────────
   if (!bot.llmProvider || !bot.llmModel || !bot.llmApiKeyEnc) {
@@ -169,6 +172,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   // ── Step 9: SafetyClassifier on OUTPUT (independent of client's LLM) ───
   const outputSafety = await safetyClassifier.classifyAsync(responseText, bot.safetyLevel as SafetyLevel);
   if (outputSafety.isCrisis) {
+    recordSafetyBlock('output_filtered');
     responseText = buildCrisisMessage(bot.crisisConfig);
     await recordCrisisEvent(bot.id, endUser.id, outputSafety.category ?? 'unknown', 'output_filtered');
   }
@@ -176,6 +180,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   // ── Step 10: Persist + send ───────────────────────────────────────────────
   const outMsg = await persistMessage(bot.id, endUser.id, 'out', 'text', responseText);
   await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: responseText, apiVersion: config.META_API_VERSION });
+  recordMessageProcessed();
 
   // ── Optional feedback collection ─────────────────────────────────────────
   const identity = bot.identity as Record<string, unknown> | null;

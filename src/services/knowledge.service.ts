@@ -1,5 +1,7 @@
 import OpenAI from 'openai';
+import { Prisma } from '@prisma/client';
 import type { BotKnowledge } from '@prisma/client';
+import { db } from '../db';
 
 const SIMILARITY_THRESHOLD = 0.35;
 const TOP_N = 3;
@@ -13,7 +15,7 @@ export function encodeEmbedding(vec: number[]): Buffer {
 
 export function decodeEmbedding(data: Buffer | Uint8Array): Float32Array {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-  // Float32Array needs 4-byte alignment; copy if needed
+  // Float32Array requires 4-byte alignment; copy if the buffer is misaligned
   if (buf.byteOffset % 4 !== 0) {
     const aligned = Buffer.allocUnsafe(buf.byteLength);
     buf.copy(aligned);
@@ -46,6 +48,23 @@ export async function generateEmbedding(
   return response.data[0].embedding;
 }
 
+/**
+ * Persist the embedding vector to both the legacy BYTEA column (for in-process
+ * fallback) and the pgvector column (for DB-side ANN search).
+ * The pgvector write is best-effort — it fails gracefully if the extension is
+ * not installed, leaving the BYTEA column as the only storage.
+ */
+export async function saveEmbeddingVector(knowledgeId: string, vec: number[]): Promise<void> {
+  const vecStr = `[${vec.join(',')}]`;
+  await db.$executeRaw(
+    Prisma.sql`
+      UPDATE "bot_knowledge"
+      SET "embedding_vec" = CAST(${vecStr} AS vector)
+      WHERE "id" = ${knowledgeId}
+    `,
+  );
+}
+
 // ─── Retrieval ────────────────────────────────────────────────────────────────
 
 export function getByKeyword(knowledge: BotKnowledge[], query: string): BotKnowledge[] {
@@ -58,31 +77,74 @@ export function getByKeyword(knowledge: BotKnowledge[], query: string): BotKnowl
   });
 }
 
+/**
+ * Return the most relevant knowledge snippets for `query`.
+ *
+ * Priority:
+ *   1. pgvector ANN search in DB  — fast, scales to 100 k+ entries, requires
+ *      the pgvector extension AND populated embedding_vec column.
+ *   2. In-process cosine similarity — correct but O(N) memory & CPU; falls back
+ *      to this when pgvector is unavailable or the column is not yet populated.
+ *   3. Keyword search — always available, no API call needed.
+ */
 export async function getRelevantKnowledge(
+  botId: string,
   knowledge: BotKnowledge[],
   query: string,
   embedderApiKey?: string,
 ): Promise<string> {
   if (!knowledge.length) return '';
 
-  // Semantic path — only when an embedder key is provided AND at least one entry
-  // has a stored embedding
   if (embedderApiKey) {
-    const withEmbeddings = knowledge.filter(k => k.embeddingData);
+    const withEmbeddings = knowledge.filter(k => k.hasEmbedding);
     if (withEmbeddings.length > 0) {
+      // Try DB-side vector search first (pgvector path)
+      try {
+        const result = await vectorSearchDB(botId, query, embedderApiKey);
+        if (result !== null) return result;
+      } catch {
+        // pgvector not installed or embedding_vec column not populated — fall through
+      }
+
+      // In-process cosine similarity (legacy / fallback path)
       try {
         return await semanticRetrieval(knowledge, query, embedderApiKey);
       } catch {
-        // Embedding call failed — fall through to keyword
+        // Embedding generation failed — fall through to keyword
       }
     }
   }
 
-  // Keyword fallback (always available, no API call)
-  const relevant = getByKeyword(knowledge, query);
-  return formatKnowledge(relevant.slice(0, TOP_N));
+  // Keyword fallback — always available, no API call
+  return formatKnowledge(getByKeyword(knowledge, query).slice(0, TOP_N));
 }
 
+// ─── Internals ────────────────────────────────────────────────────────────────
+
+/** DB-side ANN search using pgvector. Returns null if no results above threshold. */
+async function vectorSearchDB(botId: string, query: string, apiKey: string): Promise<string | null> {
+  const vec = await generateEmbedding(query, apiKey);
+  const vecStr = `[${vec.join(',')}]`;
+
+  const rows = await db.$queryRaw<Array<{ title: string; content: string; score: number }>>(
+    Prisma.sql`
+      SELECT title,
+             content,
+             1 - (embedding_vec <=> CAST(${vecStr} AS vector)) AS score
+      FROM   "bot_knowledge"
+      WHERE  bot_id = ${botId}
+        AND  embedding_vec IS NOT NULL
+      ORDER  BY embedding_vec <=> CAST(${vecStr} AS vector)
+      LIMIT  ${TOP_N}
+    `,
+  );
+
+  const relevant = rows.filter(r => Number(r.score) >= SIMILARITY_THRESHOLD);
+  if (!relevant.length) return null;
+  return relevant.map(r => `[${r.title}]\n${r.content}`).join('\n\n');
+}
+
+/** In-process cosine similarity (original implementation kept as fallback). */
 async function semanticRetrieval(
   knowledge: BotKnowledge[],
   query: string,
@@ -100,14 +162,13 @@ async function semanticRetrieval(
   const relevant = scored.slice(0, TOP_N).filter(s => s.score >= SIMILARITY_THRESHOLD);
 
   if (!relevant.length) {
-    // Nothing above threshold — try keyword on the full set
     return formatKnowledge(getByKeyword(knowledge, query).slice(0, TOP_N));
   }
 
   return formatKnowledge(relevant.map(r => r.entry));
 }
 
-function formatKnowledge(entries: BotKnowledge[]): string {
+function formatKnowledge(entries: Pick<BotKnowledge, 'title' | 'content'>[]): string {
   if (!entries.length) return '';
   return entries.map(k => `[${k.title}]\n${k.content}`).join('\n\n');
 }

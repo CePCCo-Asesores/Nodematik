@@ -4,6 +4,7 @@ import { processInboundMessage } from '../services/conversation.service';
 import { getPubClient } from '../lib/pubsub';
 import { logger } from '../logger';
 import { notifyDLQAlert } from '../services/notification.service';
+import { updateDLQDepth } from '../services/metrics.service';
 import type { InboundMessageJob } from '../types';
 
 // Separate Redis client for conversation mutex operations (not in subscriber mode)
@@ -65,6 +66,7 @@ export function startWorker(): Worker {
     if (exhausted && job) {
       dlq.add('failed-message', job.data, { jobId: `dlq-${job.id}` }).then(() => {
         notifyDLQAlert(job.id!, job.data.phoneId);
+        dlq.getWaitingCount().then(updateDLQDepth).catch(() => { /* non-critical */ });
       }).catch((dlqErr: Error) => {
         logger.error({ err: dlqErr.message }, 'failed to enqueue to DLQ');
       });

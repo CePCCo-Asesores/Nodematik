@@ -2,8 +2,12 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 import { db } from './db';
 import { getPubClient } from './lib/pubsub';
+import { registry } from './services/metrics.service';
+import { openApiSpec } from './openapi';
 import webhookRoutes from './routes/webhook';
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin/index';
@@ -23,6 +27,17 @@ export function buildApp() {
   fastify.register(helmet);
   fastify.register(cors, { origin: false }); // Webhook + admin API — no browser CORS needed
 
+  // OpenAPI spec (static mode — spec is maintained in src/openapi.ts)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  fastify.register(swagger, {
+    mode: 'static',
+    specification: { document: openApiSpec as never },
+  });
+  fastify.register(swaggerUi, {
+    routePrefix: '/docs',
+    uiConfig: { docExpansion: 'none', filter: true },
+  });
+
   // Global rate limit; tighter per-route overrides applied on /webhook POST
   fastify.register(rateLimit, {
     global: true,
@@ -32,6 +47,11 @@ export function buildApp() {
   });
 
   // Health check — probes DB and Redis so Railway readiness is meaningful
+  // Prometheus metrics — restrict network access in production (no auth here to allow scraping)
+  fastify.get('/metrics', { config: { rateLimit: false } }, async (_req, reply) => {
+    return reply.type('text/plain; version=0.0.4').send(await registry.metrics());
+  });
+
   fastify.get('/health', { config: { rateLimit: false } }, async (_req, reply) => {
     const [dbOk, redisOk] = await Promise.all([
       db.$queryRaw`SELECT 1`.then(() => true).catch(() => false),

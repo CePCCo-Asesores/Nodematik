@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import type { LLMProvider } from './types';
 import { LLMCredentialError, LLMRateLimitError } from './types';
+import { recordLLMUsage, recordLLMError } from '../../services/metrics.service';
 import type { LLMCompletionInput, LLMCompletionOutput } from '../../types';
 
 export class OpenAIProvider implements LLMProvider {
@@ -16,6 +17,7 @@ export class OpenAIProvider implements LLMProvider {
       { role: 'user', content: input.userMessage },
     ];
 
+    const startMs = Date.now();
     let response: OpenAI.Chat.ChatCompletion;
     try {
       response = await client.chat.completions.create({
@@ -25,15 +27,18 @@ export class OpenAIProvider implements LLMProvider {
         temperature: input.params?.temperature as number | undefined,
       });
     } catch (err) {
+      recordLLMError('openai', err instanceof OpenAI.RateLimitError ? 'rate_limit' : 'api_error');
       throw translateError(err);
     }
 
+    const durationMs = Date.now() - startMs;
+    const inputTokens = response.usage?.prompt_tokens ?? 0;
+    const outputTokens = response.usage?.completion_tokens ?? 0;
+    recordLLMUsage('openai', input.model, durationMs, inputTokens, outputTokens);
+
     return {
       text: response.choices[0]?.message?.content ?? '',
-      usage: {
-        inputTokens: response.usage?.prompt_tokens,
-        outputTokens: response.usage?.completion_tokens,
-      },
+      usage: { inputTokens, outputTokens },
     };
   }
 }

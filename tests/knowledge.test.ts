@@ -98,18 +98,18 @@ describe('encodeEmbedding / decodeEmbedding', () => {
 
 describe('getRelevantKnowledge', () => {
   it('returns keyword results when no embedder key is provided', async () => {
-    const result = await getRelevantKnowledge(KB, 'soñé con agua', undefined);
+    const result = await getRelevantKnowledge('bot-1', KB, 'soñé con agua', undefined);
     expect(result).toContain('Agua en sueños');
     expect(result).not.toContain('Volar en sueños');
   });
 
   it('returns empty string when nothing matches', async () => {
-    const result = await getRelevantKnowledge(KB, 'dinosaurio jurásico', undefined);
+    const result = await getRelevantKnowledge('bot-1', KB, 'dinosaurio jurásico', undefined);
     expect(result).toBe('');
   });
 
   it('returns empty string for empty knowledge base', async () => {
-    const result = await getRelevantKnowledge([], 'serpiente', undefined);
+    const result = await getRelevantKnowledge('bot-1', [], 'serpiente', undefined);
     expect(result).toBe('');
   });
 
@@ -127,7 +127,8 @@ describe('getRelevantKnowledge', () => {
 
     mockEmbeddingsCreate.mockResolvedValueOnce({ data: [{ embedding: queryVec }] });
 
-    const result = await getRelevantKnowledge(kbWithEmbeddings, 'serpiente', 'fake-key');
+    // pgvector DB search will fail (db not mocked) → falls through to in-process cosine
+    const result = await getRelevantKnowledge('bot-1', kbWithEmbeddings, 'serpiente', 'fake-key');
     expect(result).toContain('Serpientes');
     expect(result).not.toContain('Volar');
   });
@@ -137,9 +138,11 @@ describe('getRelevantKnowledge', () => {
       makeEntry('s1', 'Serpientes', 'Transformación y peligro', [], [1, 0, 0]),
     ];
 
+    // Both DB and in-process embedding calls will reject → keyword fallback
+    mockEmbeddingsCreate.mockRejectedValueOnce(new Error('OpenAI API error'));
     mockEmbeddingsCreate.mockRejectedValueOnce(new Error('OpenAI API error'));
 
-    const result = await getRelevantKnowledge(kbWithEmbeddings, 'serpiente transformación', 'fake-key');
+    const result = await getRelevantKnowledge('bot-1', kbWithEmbeddings, 'serpiente transformación', 'fake-key');
     expect(result).toContain('Serpientes'); // keyword fallback worked
   });
 });
