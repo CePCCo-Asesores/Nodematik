@@ -9,6 +9,8 @@ const schema = z.object({
   META_API_VERSION: z.string().default('v21.0'),
   WEBHOOK_VERIFY_TOKEN: z.string().min(1),
   ADMIN_API_KEY: z.string().min(1),
+  JWT_SECRET: z.string().min(1),
+  META_APP_ID: z.string().optional(), // required only for Embedded Signup
   POLICY_VERSION: z.string().default('1.0'),
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),

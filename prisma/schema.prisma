@@ -8,9 +8,13 @@ datasource db {
 }
 
 model Organization {
-  id        String   @id @default(uuid())
-  name      String
-  createdAt DateTime @default(now()) @map("created_at")
+  id                 String   @id @default(uuid())
+  name               String
+  plan               String   @default("free") // 'free' | 'pro' | 'enterprise'
+  msgQuota           Int      @default(1000) @map("msg_quota") // 0 = unlimited
+  msgUsed            Int      @default(0) @map("msg_used")
+  currentPeriodStart DateTime @default(now()) @map("current_period_start")
+  createdAt          DateTime @default(now()) @map("created_at")
 
   orgUsers OrgUser[]
   bots     Bot[]

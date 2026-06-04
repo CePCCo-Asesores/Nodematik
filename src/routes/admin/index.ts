@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { config } from '../../config';
+import { db } from '../../db';
+import { requireAuth } from '../../middleware/auth';
 import botRoutes from './bots';
 import channelRoutes from './channels';
 import orgRoutes from './organizations';
@@ -10,11 +11,18 @@ import proactiveRoutes from './proactive';
 import integrationRoutes from './integrations';
 
 const adminRoutes: FastifyPluginAsync = async (fastify) => {
-  // Phase A: simple API key auth via X-Admin-Key header or Bearer token
+  // Auth: JWT or ADMIN_API_KEY superadmin bypass
+  fastify.addHook('preHandler', requireAuth);
+
+  // Org isolation: verify botId-scoped routes belong to the requesting org
   fastify.addHook('preHandler', async (req, reply) => {
-    const key = req.headers['x-admin-key'] ?? (req.headers['authorization']?.replace(/^Bearer\s+/i, ''));
-    if (key !== config.ADMIN_API_KEY) {
-      return reply.status(401).send({ error: 'Unauthorized' });
+    const params = req.params as Record<string, string>;
+    const botId = params.botId;
+    if (!botId || !req.user || req.user.isSuperadmin) return;
+
+    const bot = await db.bot.findUnique({ where: { id: botId }, select: { orgId: true } });
+    if (!bot || bot.orgId !== req.user.orgId) {
+      return reply.status(403).send({ error: 'Forbidden' });
     }
   });
 

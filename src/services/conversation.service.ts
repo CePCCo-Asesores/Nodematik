@@ -8,6 +8,7 @@ import { safetyClassifier } from './safety.service';
 import { notifyCredentialError } from './notification.service';
 import * as consentService from './consent.service';
 import { getRelevantKnowledge } from './knowledge.service';
+import { checkQuota, incrementUsage } from './quota.service';
 import { downloadMedia } from './media.service';
 import { getLLMProvider, LLMCredentialError, LLMRateLimitError } from '../providers/llm';
 import { getChannelProvider } from '../providers/channel';
@@ -101,6 +102,13 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   const embedderKey = resolveEmbedderKey(bot.integrations, bot.llmProvider ?? '', bot.llmApiKeyEnc);
   const knowledge = await getRelevantKnowledge(bot.knowledge, inputText, embedderKey);
 
+  // ── Quota gate (before any LLM call) ────────────────────────────────────
+  const withinQuota = await checkQuota(bot.orgId).catch(() => true); // fail open
+  if (!withinQuota) {
+    await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: 'El servicio ha alcanzado su límite mensual de mensajes. Contacta al administrador.', apiVersion: config.META_API_VERSION });
+    return;
+  }
+
   // ── Step 8: LLM (client's provider + client's key) ───────────────────────
   if (!bot.llmProvider || !bot.llmModel || !bot.llmApiKeyEnc) {
     await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: 'El servicio no está configurado aún. Intenta más tarde.', apiVersion: config.META_API_VERSION });
@@ -139,6 +147,9 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   // ── Step 10: Persist + send ───────────────────────────────────────────────
   const outMsg = await persistMessage(bot.id, endUser.id, 'out', 'text', responseText);
   await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: responseText, apiVersion: config.META_API_VERSION });
+
+  // Track usage after a successful LLM response
+  incrementUsage(bot.orgId).catch(() => {}); // non-critical
 
   // ── Optional feedback collection ─────────────────────────────────────────
   const identity = bot.identity as Record<string, unknown> | null;

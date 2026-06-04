@@ -5,9 +5,11 @@ import { encrypt } from '../../crypto';
 import { invalidateBotCache } from '../../services/bot.service';
 
 const botRoutes: FastifyPluginAsync = async (fastify) => {
-  // List all bots
-  fastify.get('/', async (_req, reply) => {
+  // List bots — scoped to the requesting org
+  fastify.get('/', async (req, reply) => {
+    const orgFilter = req.user!.isSuperadmin ? {} : { orgId: req.user!.orgId };
     const bots = await db.bot.findMany({
+      where: orgFilter,
       include: { branding: true, channels: { select: { id: true, phoneId: true, status: true, provider: true } } },
       orderBy: { createdAt: 'desc' },
     });
@@ -21,16 +23,18 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
       include: { branding: true, commands: true, crisisConfig: true, channels: { select: { id: true, phoneId: true, status: true, provider: true } }, knowledge: true, promptVersions: { orderBy: { version: 'desc' }, take: 10 } },
     });
     if (!bot) return reply.status(404).send({ error: 'Bot not found' });
+    if (!req.user!.isSuperadmin && bot.orgId !== req.user!.orgId) return reply.status(403).send({ error: 'Forbidden' });
     return reply.send(sanitizeBot(bot));
   });
 
-  // Create bot
+  // Create bot — orgId defaults to caller's org
   fastify.post<{ Body: CreateBotBody }>('/', async (req, reply) => {
     const body = req.body;
+    const orgId = req.user!.isSuperadmin ? (body.orgId ?? req.user!.orgId) : req.user!.orgId;
 
     const bot = await db.bot.create({
       data: {
-        orgId: body.orgId,
+        orgId,
         name: body.name,
         locale: body.locale ?? 'es-MX',
         systemPrompt: body.systemPrompt,
@@ -59,6 +63,7 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
 
     const existing = await db.bot.findUnique({ where: { id } });
     if (!existing) return reply.status(404).send({ error: 'Bot not found' });
+    if (!req.user!.isSuperadmin && existing.orgId !== req.user!.orgId) return reply.status(403).send({ error: 'Forbidden' });
 
     const data: Record<string, unknown> = {};
     if (body.name !== undefined) data.name = body.name;
@@ -80,6 +85,9 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
   // Delete bot
   fastify.delete<{ Params: { id: string } }>('/:id', async (req, reply) => {
     const { id } = req.params;
+    const existing = await db.bot.findUnique({ where: { id }, select: { orgId: true } });
+    if (!existing) return reply.status(404).send({ error: 'Bot not found' });
+    if (!req.user!.isSuperadmin && existing.orgId !== req.user!.orgId) return reply.status(403).send({ error: 'Forbidden' });
     await db.bot.delete({ where: { id } });
     invalidateBotCache(id);
     return reply.status(204).send();
@@ -203,7 +211,7 @@ function sanitizeBot(bot: Record<string, unknown>): Record<string, unknown> {
 // ─── Body types ──────────────────────────────────────────────────────────────
 
 interface CreateBotBody {
-  orgId: string;
+  orgId?: string; // ignored for non-superadmin (uses JWT orgId)
   name: string;
   locale?: string;
   systemPrompt?: string;

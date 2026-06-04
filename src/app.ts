@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import webhookRoutes from './routes/webhook';
+import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin/index';
 
 export function buildApp() {
@@ -22,6 +23,7 @@ export function buildApp() {
   fastify.get('/health', async () => ({ status: 'ok', ts: Date.now() }));
 
   fastify.register(webhookRoutes);
+  fastify.register(authRoutes, { prefix: '/auth' });
   fastify.register(adminRoutes, { prefix: '/admin' });
 
   fastify.setErrorHandler((err, _req, reply) => {
