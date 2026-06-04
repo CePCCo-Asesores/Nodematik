@@ -1,0 +1,81 @@
+import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
+import { createHmac, timingSafeEqual } from 'crypto';
+import { config } from '../config';
+import { enqueueInboundMessage } from '../queue/producer';
+import { getChannelProvider } from '../providers/channel';
+
+// The Meta Cloud provider parses any Meta-formatted webhook
+const metaProvider = getChannelProvider('meta_cloud');
+
+interface RawBodyRequest extends FastifyRequest {
+  rawBody?: Buffer;
+}
+
+const webhookRoutes: FastifyPluginAsync = async (fastify) => {
+  // Keep raw body available for HMAC verification — scoped to this plugin only
+  fastify.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
+    (req as RawBodyRequest).rawBody = body as Buffer;
+    try {
+      done(null, JSON.parse((body as Buffer).toString()));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
+  // GET — Meta webhook verification challenge
+  fastify.get('/webhook', async (req, reply) => {
+    const q = req.query as Record<string, string>;
+    if (q['hub.mode'] === 'subscribe' && q['hub.verify_token'] === config.WEBHOOK_VERIFY_TOKEN) {
+      return reply.send(q['hub.challenge']);
+    }
+    return reply.status(403).send('Forbidden');
+  });
+
+  // POST — Incoming messages from Meta
+  fastify.post('/webhook', async (req, reply) => {
+    const rawReq = req as RawBodyRequest;
+    const signature = req.headers['x-hub-signature-256'] as string | undefined;
+
+    if (!signature || !verifySignature(rawReq.rawBody ?? Buffer.alloc(0), signature)) {
+      return reply.status(401).send('Invalid signature');
+    }
+
+    // ACK immediately — Meta requires < 5 s response
+    reply.status(200).send('EVENT_RECEIVED');
+
+    // Parse + enqueue asynchronously (fire-and-forget, errors logged)
+    processPayload(req.body).catch((err: Error) => {
+      fastify.log.error({ err: err.message }, 'webhook payload processing error');
+    });
+  });
+};
+
+async function processPayload(body: unknown): Promise<void> {
+  const { messages } = metaProvider.parseInbound(body);
+  for (const msg of messages) {
+    await enqueueInboundMessage({
+      phoneId: msg.phoneId,
+      waMessageId: msg.messageId,
+      from: msg.from,
+      messageType: msg.type,
+      textBody: msg.textBody,
+      audioId: msg.audioId,
+      interactiveReply: msg.interactiveReply,
+      timestamp: msg.timestamp,
+    });
+  }
+}
+
+function verifySignature(rawBody: Buffer, signature: string): boolean {
+  if (!signature.startsWith('sha256=')) return false;
+  const expected = createHmac('sha256', config.META_APP_SECRET).update(rawBody).digest('hex');
+  const provided = signature.slice('sha256='.length);
+  if (expected.length !== provided.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(provided, 'hex'));
+  } catch {
+    return false;
+  }
+}
+
+export default webhookRoutes;

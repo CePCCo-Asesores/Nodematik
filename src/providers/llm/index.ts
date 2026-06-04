@@ -1,0 +1,23 @@
+import type { LLMProvider } from './types';
+import { AnthropicProvider } from './anthropic';
+import { OpenAIProvider } from './openai';
+
+export { LLMCredentialError, LLMRateLimitError } from './types';
+export type { LLMProvider };
+
+const registry = new Map<string, LLMProvider>();
+
+registry.set('anthropic', new AnthropicProvider());
+registry.set('openai', new OpenAIProvider());
+
+export function getLLMProvider(providerName: string): LLMProvider {
+  const provider = registry.get(providerName);
+  if (!provider) {
+    throw new Error(`Unknown LLM provider: "${providerName}". Registered: ${[...registry.keys()].join(', ')}`);
+  }
+  return provider;
+}
+
+export function registerLLMProvider(name: string, provider: LLMProvider): void {
+  registry.set(name, provider);
+}

@@ -1,0 +1,237 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  orgUsers OrgUser[]
+  bots     Bot[]
+
+  @@map("organizations")
+}
+
+model OrgUser {
+  id           String   @id @default(uuid())
+  orgId        String   @map("org_id")
+  email        String   @unique
+  role         String   // 'owner' | 'admin' | 'editor'
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  org               Organization       @relation(fields: [orgId], references: [id])
+  botPromptVersions BotPromptVersion[]
+
+  @@map("org_users")
+}
+
+// Core entity — every row is a complete chatbot. Config only, no code.
+model Bot {
+  id            String   @id @default(uuid())
+  orgId         String   @map("org_id")
+  name          String
+  status        String   @default("draft") // 'draft' | 'active' | 'paused' | 'credential_error'
+  locale        String   @default("es-MX")
+  systemPrompt  String?  @map("system_prompt")
+  identity      Json?
+  onboardingMsg String?  @map("onboarding_msg")
+  historyWindow Int      @default(5) @map("history_window")
+  // LLM chosen by the client — credentials supplied by client, encrypted
+  llmProvider   String?  @map("llm_provider") // 'anthropic' | 'openai' | 'google' | 'mistral' | ...
+  llmModel      String?  @map("llm_model")
+  llmApiKeyEnc  Bytes?   @map("llm_api_key_enc") // AES-256-GCM encrypted
+  llmParams     Json?    @map("llm_params")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  org            Organization       @relation(fields: [orgId], references: [id])
+  branding       BotBranding?
+  promptVersions BotPromptVersion[]
+  commands       BotCommand[]
+  knowledge      BotKnowledge[]
+  crisisConfig   BotCrisisConfig[]
+  channels       Channel[]
+  integrations   BotIntegration[]
+  endUsers       EndUser[]
+  messages       Message[]
+  crisisEvents   CrisisEvent[]
+
+  @@map("bots")
+}
+
+model BotBranding {
+  id               String  @id @default(uuid())
+  botId            String  @unique @map("bot_id")
+  companyName      String? @map("company_name")
+  logoUrl          String? @map("logo_url")
+  primaryColor     String? @map("primary_color")
+  website          String?
+  supportContact   String? @map("support_contact")
+  privacyPolicyUrl String? @map("privacy_policy_url")
+  termsUrl         String? @map("terms_url")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@map("bot_branding")
+}
+
+model BotPromptVersion {
+  id           String   @id @default(uuid())
+  botId        String   @map("bot_id")
+  version      Int
+  systemPrompt String   @map("system_prompt")
+  createdBy    String?  @map("created_by")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  bot    Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  editor OrgUser? @relation(fields: [createdBy], references: [id])
+
+  @@map("bot_prompt_versions")
+}
+
+model BotCommand {
+  id           String @id @default(uuid())
+  botId        String @map("bot_id")
+  trigger      String
+  responseType String @map("response_type") // 'static' | 'action'
+  payload      Json
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, trigger])
+  @@map("bot_commands")
+}
+
+model BotKnowledge {
+  id      String   @id @default(uuid())
+  botId   String   @map("bot_id")
+  title   String
+  content String
+  tags    String[]
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@map("bot_knowledge")
+}
+
+model BotCrisisConfig {
+  id      String  @id @default(uuid())
+  botId   String  @map("bot_id")
+  country String
+  lines   Json    // [{name, phone, hours}]
+  enabled Boolean @default(true)
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@map("bot_crisis_config")
+}
+
+model Channel {
+  id          String @id @default(uuid())
+  botId       String @map("bot_id")
+  provider    String // 'meta_cloud' | 'embedded_signup' | 'bsp_*'
+  phoneId     String @map("phone_id")
+  credentials Bytes  // AES-256-GCM encrypted JSON {accessToken, businessAccountId}
+  verifyToken String @map("verify_token")
+  status      String @default("pending") // 'connected' | 'pending' | 'error'
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([phoneId])
+  @@map("channels")
+}
+
+model BotIntegration {
+  id          String @id @default(uuid())
+  botId       String @map("bot_id")
+  kind        String // 'stt' | ...
+  provider    String
+  credentials Bytes  // AES-256-GCM encrypted JSON
+  status      String @default("active")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@map("bot_integrations")
+}
+
+model EndUser {
+  id          String   @id @default(uuid())
+  botId       String   @map("bot_id")
+  waPhoneHash String   @map("wa_phone_hash") // SHA-256 of WA phone — never stored in clear
+  locale      String?
+  paused      Boolean  @default(false)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  bot          Bot           @relation(fields: [botId], references: [id])
+  consents     Consent[]
+  messages     Message[]
+  crisisEvents CrisisEvent[]
+  feedback     Feedback[]
+
+  @@unique([botId, waPhoneHash])
+  @@map("end_users")
+}
+
+model Consent {
+  id            String   @id @default(uuid())
+  endUserId     String   @map("end_user_id")
+  botId         String   @map("bot_id")
+  acceptedAt    DateTime @default(now()) @map("accepted_at")
+  policyVersion String   @map("policy_version")
+
+  endUser EndUser @relation(fields: [endUserId], references: [id])
+
+  @@map("consents")
+}
+
+model Message {
+  id         String   @id @default(uuid())
+  botId      String   @map("bot_id")
+  endUserId  String   @map("end_user_id")
+  direction  String   // 'in' | 'out'
+  inputType  String   @map("input_type") // 'text' | 'voice' | 'interactive'
+  bodyEnc    Bytes    @map("body_enc") // AES-256-GCM encrypted
+  externalId String?  @map("external_id") // WA message_id for idempotency
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  bot      Bot        @relation(fields: [botId], references: [id])
+  endUser  EndUser    @relation(fields: [endUserId], references: [id])
+  feedback Feedback[]
+
+  @@index([botId, endUserId, createdAt])
+  @@map("messages")
+}
+
+model CrisisEvent {
+  id          String   @id @default(uuid())
+  botId       String   @map("bot_id")
+  endUserId   String   @map("end_user_id")
+  detectedAt  DateTime @default(now()) @map("detected_at")
+  category    String
+  actionTaken String   @map("action_taken")
+
+  bot     Bot     @relation(fields: [botId], references: [id])
+  endUser EndUser @relation(fields: [endUserId], references: [id])
+
+  @@map("crisis_events")
+}
+
+model Feedback {
+  id        String   @id @default(uuid())
+  messageId String   @map("message_id")
+  endUserId String   @map("end_user_id")
+  rating    Int
+  createdAt DateTime @default(now()) @map("created_at")
+
+  message Message @relation(fields: [messageId], references: [id])
+  endUser EndUser @relation(fields: [endUserId], references: [id])
+
+  @@map("feedback")
+}
