@@ -138,12 +138,14 @@ export const CreateOrgSchema = z.object({
   name: z.string().min(1),
   plan: z.enum(['free', 'pro', 'enterprise']).optional(),
   msgQuota: z.number().int().min(0).optional(),
+  sentryDsn: z.string().url().optional(), // tenant's own Sentry DSN — stored encrypted
 });
 
 export const UpdateOrgSchema = z.object({
   name: z.string().min(1).optional(),
   plan: z.enum(['free', 'pro', 'enterprise']).optional(),
   msgQuota: z.number().int().min(0).optional(),
+  sentryDsn: z.string().url().optional().nullable(), // null = clear the DSN
 });
 
 export const InviteMemberSchema = z.object({

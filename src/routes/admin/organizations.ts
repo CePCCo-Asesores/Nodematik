@@ -3,24 +3,33 @@ import { db } from '../../db';
 import { hashPassword } from '../../services/auth.service';
 import { requirePermission } from '../../lib/rbac';
 import { logAudit } from '../../services/audit.service';
+import { encrypt } from '../../crypto';
 import { parseBody, CreateOrgSchema, UpdateOrgSchema, InviteMemberSchema, UpdateMemberRoleSchema } from '../../lib/validate';
 
 const orgRoutes: FastifyPluginAsync = async (fastify) => {
   // List orgs — superadmin sees all, org users see only their own
   fastify.get('/', async (req, reply) => {
     if (req.user!.isSuperadmin) {
-      return reply.send(await db.organization.findMany({ orderBy: { createdAt: 'desc' } }));
+      const orgs = await db.organization.findMany({ orderBy: { createdAt: 'desc' } });
+      return reply.send(orgs.map(sanitizeOrg));
     }
     const org = await db.organization.findUnique({ where: { id: req.user!.orgId } });
-    return reply.send(org ? [org] : []);
+    return reply.send(org ? [sanitizeOrg(org)] : []);
   });
 
   // Create org — superadmin only (regular users create via POST /auth/register)
   fastify.post('/', async (req, reply) => {
     if (!req.user!.isSuperadmin) return reply.status(403).send({ error: 'Forbidden' });
-    const { name, plan, msgQuota } = parseBody(CreateOrgSchema, req.body);
-    const org = await db.organization.create({ data: { name, plan: plan ?? 'free', msgQuota: msgQuota ?? 1000 } });
-    return reply.status(201).send(org);
+    const { name, plan, msgQuota, sentryDsn } = parseBody(CreateOrgSchema, req.body);
+    const org = await db.organization.create({
+      data: {
+        name,
+        plan: plan ?? 'free',
+        msgQuota: msgQuota ?? 1000,
+        sentryDsnEnc: sentryDsn ? encrypt(sentryDsn) : undefined,
+      },
+    });
+    return reply.status(201).send(sanitizeOrg(org));
   });
 
   // Get single org
@@ -33,7 +42,7 @@ const orgRoutes: FastifyPluginAsync = async (fastify) => {
       include: { bots: { select: { id: true, name: true, status: true, createdAt: true } } },
     });
     if (!org) return reply.status(404).send({ error: 'Organization not found' });
-    return reply.send(org);
+    return reply.send(sanitizeOrg(org));
   });
 
   // Update org
@@ -41,16 +50,20 @@ const orgRoutes: FastifyPluginAsync = async (fastify) => {
     if (!req.user!.isSuperadmin && req.user!.orgId !== req.params.id) {
       return reply.status(403).send({ error: 'Forbidden' });
     }
-    const { name, plan, msgQuota } = parseBody(UpdateOrgSchema, req.body);
+    const { name, plan, msgQuota, sentryDsn } = parseBody(UpdateOrgSchema, req.body);
     const data: Record<string, unknown> = {};
     if (name !== undefined) data.name = name;
+    // sentryDsn: any member of the org can configure their own Sentry DSN
+    if (sentryDsn !== undefined) {
+      data.sentryDsnEnc = sentryDsn ? encrypt(sentryDsn) : null;
+    }
     // Only superadmin can change plan/quota
     if (req.user!.isSuperadmin) {
       if (plan !== undefined) data.plan = plan;
       if (msgQuota !== undefined) data.msgQuota = msgQuota;
     }
     const org = await db.organization.update({ where: { id: req.params.id }, data });
-    return reply.send(org);
+    return reply.send(sanitizeOrg(org));
   });
 
   // Delete org — superadmin only
@@ -172,5 +185,14 @@ const orgRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(entries);
   });
 };
+
+// Never expose the encrypted Sentry DSN blob — return a boolean flag instead
+// so the frontend can show "Sentry configured ✓" without leaking the value.
+function sanitizeOrg<T extends { sentryDsnEnc?: Buffer | Uint8Array | null }>(
+  org: T,
+): Omit<T, 'sentryDsnEnc'> & { hasSentryDsn: boolean } {
+  const { sentryDsnEnc, ...rest } = org;
+  return { ...rest, hasSentryDsn: sentryDsnEnc != null };
+}
 
 export default orgRoutes;

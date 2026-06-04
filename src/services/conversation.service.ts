@@ -7,6 +7,7 @@ import { loadChannelByPhoneId, invalidateBotCache } from './bot.service';
 import { safetyClassifier } from './safety.service';
 import type { SafetyLevel } from './safety.service';
 import { notifyCredentialError, notifyLLMFailure } from './notification.service';
+import { captureTenantException } from './tenant-sentry.service';
 import * as consentService from './consent.service';
 import { getRelevantKnowledge } from './knowledge.service';
 import { tryIncrementQuota } from './quota.service';
@@ -165,7 +166,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
     });
     responseText = result.text;
   } catch (err) {
-    await handleLLMError(err, bot.id, bot.name, channelProvider, channel.phoneId, channelCreds, job.from);
+    await handleLLMError(err, bot.id, bot.name, bot.orgId, channelProvider, channel.phoneId, channelCreds, job.from);
     return;
   }
 
@@ -408,22 +409,27 @@ async function handleLLMError(
   err: unknown,
   botId: string,
   botName: string,
+  orgId: string,
   channelProvider: ReturnType<typeof getChannelProvider>,
   phoneId: string,
   creds: MetaCloudCredentials,
   to: string,
 ): Promise<void> {
+  const error = err instanceof Error ? err : new Error(String(err));
   if (err instanceof LLMCredentialError) {
     await db.bot.update({ where: { id: botId }, data: { status: 'credential_error' } });
     invalidateBotCache(botId);
-    notifyCredentialError({ botId, botName, errorMessage: (err as Error).message, detectedAt: new Date() });
+    notifyCredentialError({ botId, botName, errorMessage: error.message, detectedAt: new Date() });
+    captureTenantException(orgId, error, { botId, botName, errorType: 'credential_error' });
     await channelProvider.sendText({ phoneId, accessToken: creds.accessToken, to, text: 'El servicio no está disponible en este momento. Inténtalo más tarde.', apiVersion: config.META_API_VERSION });
     return;
   }
   if (err instanceof LLMRateLimitError) {
-    notifyLLMFailure(botId, botName, (err as Error).message);
+    notifyLLMFailure(botId, botName, error.message);
+    captureTenantException(orgId, error, { botId, botName, errorType: 'rate_limit' });
     throw err;
   }
-  notifyLLMFailure(botId, botName, err instanceof Error ? err.message : String(err));
+  notifyLLMFailure(botId, botName, error.message);
+  captureTenantException(orgId, error, { botId, botName, errorType: 'llm_error' });
   throw err;
 }

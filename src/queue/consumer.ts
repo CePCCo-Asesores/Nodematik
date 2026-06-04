@@ -6,6 +6,8 @@ import { logger } from '../logger';
 import { notifyDLQAlert } from '../services/notification.service';
 import { updateDLQDepth } from '../services/metrics.service';
 import { Sentry } from '../lib/sentry';
+import { captureTenantException } from '../services/tenant-sentry.service';
+import { db } from '../db';
 import type { InboundMessageJob } from '../types';
 
 // Separate Redis client for conversation mutex operations (not in subscriber mode)
@@ -62,7 +64,7 @@ export function startWorker(): Worker {
       'job failed',
     );
 
-    // Report exhausted jobs to Sentry for visibility on production incidents
+    // Report exhausted jobs to both platform Sentry and the tenant's Sentry
     if (exhausted && err) {
       Sentry.withScope((scope) => {
         scope.setTag('phoneId', job?.data?.phoneId ?? 'unknown');
@@ -70,6 +72,25 @@ export function startWorker(): Worker {
         scope.setExtra('jobId', job?.id);
         Sentry.captureException(err);
       });
+
+      // Resolve the org from the phone channel and report to tenant's Sentry
+      if (job?.data?.phoneId) {
+        db.channel
+          .findFirst({
+            where: { phoneId: job.data.phoneId },
+            select: { bot: { select: { orgId: true } } },
+          })
+          .then((ch) => {
+            if (ch?.bot?.orgId) {
+              captureTenantException(ch.bot.orgId, err, {
+                jobId: job.id,
+                requestId: job.data.requestId,
+                errorType: 'job_exhausted',
+              });
+            }
+          })
+          .catch(() => { /* non-critical */ });
+      }
     }
 
     // Move to DLQ once all retries are exhausted so the payload is preserved

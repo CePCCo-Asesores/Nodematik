@@ -14,6 +14,7 @@ model Organization {
   msgQuota           Int      @default(1000) @map("msg_quota") // 0 = unlimited
   msgUsed            Int      @default(0) @map("msg_used")
   currentPeriodStart DateTime @default(now()) @map("current_period_start")
+  sentryDsnEnc       Bytes?   @map("sentry_dsn_enc") // AES-256-GCM encrypted; null = tenant Sentry disabled
   createdAt          DateTime @default(now()) @map("created_at")
 
   orgUsers OrgUser[]
