@@ -1,5 +1,6 @@
 import type { Bot, BotBranding, BotCommand, BotCrisisConfig, BotIntegration, BotKnowledge, Channel } from '@prisma/client';
 import { db } from '../db';
+import { getPubClient, CACHE_INVALIDATE_CHANNEL } from '../lib/pubsub';
 
 export type BotWithRelations = Bot & {
   branding: BotBranding | null;
@@ -72,9 +73,21 @@ export async function loadBotById(botId: string): Promise<BotWithRelations | nul
   return entry.value;
 }
 
-export function invalidateBotCache(botId: string): void {
+/** Clear local cache entries — called from pub/sub subscription handler. */
+export function clearLocalBotCache(botId: string): void {
   botCache.delete(botId);
   for (const [key, entry] of channelCache) {
     if (entry.value.botId === botId) channelCache.delete(key);
   }
+}
+
+/**
+ * Invalidate local cache AND publish to Redis so all service instances
+ * (web + worker running on separate Railway services) also evict.
+ */
+export function invalidateBotCache(botId: string): void {
+  clearLocalBotCache(botId);
+  getPubClient().publish(CACHE_INVALIDATE_CHANNEL, botId).catch(() => {
+    // Non-critical — local cache already cleared; other instances expire via TTL
+  });
 }

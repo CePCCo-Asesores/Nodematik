@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { db } from '../../db';
 import { encrypt } from '../../crypto';
 import { invalidateBotCache } from '../../services/bot.service';
+import { requirePermission, can } from '../../lib/rbac';
 import {
   parseBody,
   CreateBotSchema, UpdateBotSchema, PromptSchema,
@@ -43,7 +44,7 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Create bot — orgId defaults to caller's org
-  fastify.post('/', async (req, reply) => {
+  fastify.post('/', { preHandler: [requirePermission('bot:create')] }, async (req, reply) => {
     const body = parseBody(CreateBotSchema, req.body);
     const orgId = req.user!.isSuperadmin ? (body.orgId ?? req.user!.orgId) : req.user!.orgId;
 
@@ -72,9 +73,14 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Update bot
-  fastify.put<{ Params: { id: string } }>('/:id', async (req, reply) => {
+  fastify.put<{ Params: { id: string } }>('/:id', { preHandler: [requirePermission('bot:update-config')] }, async (req, reply) => {
     const { id } = req.params;
     const body = parseBody(UpdateBotSchema, req.body);
+
+    // Updating the LLM API key requires a higher-privilege action
+    if (body.llmApiKey !== undefined && !req.user!.isSuperadmin && !can(req.user!.role, 'bot:update-credentials')) {
+      return reply.status(403).send({ error: "Forbidden: requires permission 'bot:update-credentials'" });
+    }
 
     const existing = await db.bot.findUnique({ where: { id } });
     if (!existing) return reply.status(404).send({ error: 'Bot not found' });
@@ -98,7 +104,7 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Delete bot
-  fastify.delete<{ Params: { id: string } }>('/:id', async (req, reply) => {
+  fastify.delete<{ Params: { id: string } }>('/:id', { preHandler: [requirePermission('bot:delete')] }, async (req, reply) => {
     const { id } = req.params;
     const existing = await db.bot.findUnique({ where: { id }, select: { orgId: true } });
     if (!existing) return reply.status(404).send({ error: 'Bot not found' });
@@ -109,7 +115,7 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Update system_prompt (creates a new version)
-  fastify.post<{ Params: { id: string } }>('/:id/prompt', async (req, reply) => {
+  fastify.post<{ Params: { id: string } }>('/:id/prompt', { preHandler: [requirePermission('bot:update-prompt')] }, async (req, reply) => {
     const { id } = req.params;
     const { systemPrompt } = parseBody(PromptSchema, req.body);
     const createdBy = req.user!.userId;
@@ -136,7 +142,7 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Rollback to a specific prompt version
-  fastify.post<{ Params: { id: string; version: string } }>('/:id/rollback/:version', async (req, reply) => {
+  fastify.post<{ Params: { id: string; version: string } }>('/:id/rollback/:version', { preHandler: [requirePermission('bot:update-prompt')] }, async (req, reply) => {
     const { id, version } = req.params;
     const ver = await db.botPromptVersion.findFirst({ where: { botId: id, version: Number(version) } });
     if (!ver) return reply.status(404).send({ error: 'Version not found' });
@@ -161,7 +167,7 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(branding);
   });
 
-  fastify.put<{ Params: { id: string } }>('/:id/branding', async (req, reply) => {
+  fastify.put<{ Params: { id: string } }>('/:id/branding', { preHandler: [requirePermission('bot:update-branding')] }, async (req, reply) => {
     const body = parseBody(BrandingSchema, req.body);
     const branding = await db.botBranding.upsert({
       where: { botId: req.params.id },
@@ -178,7 +184,7 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(await db.botCommand.findMany({ where: { botId: req.params.id } }));
   });
 
-  fastify.post<{ Params: { id: string } }>('/:id/commands', async (req, reply) => {
+  fastify.post<{ Params: { id: string } }>('/:id/commands', { preHandler: [requirePermission('bot:update-commands')] }, async (req, reply) => {
     const body = parseBody(CommandSchema, req.body);
     const cmd = await db.botCommand.create({
       data: { botId: req.params.id, ...body, payload: body.payload as Prisma.InputJsonValue },
@@ -187,7 +193,7 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.status(201).send(cmd);
   });
 
-  fastify.put<{ Params: { id: string; cmdId: string } }>('/:id/commands/:cmdId', async (req, reply) => {
+  fastify.put<{ Params: { id: string; cmdId: string } }>('/:id/commands/:cmdId', { preHandler: [requirePermission('bot:update-commands')] }, async (req, reply) => {
     const body = parseBody(CommandSchema.partial(), req.body);
     const updateData: Prisma.BotCommandUpdateInput = {};
     if (body.trigger !== undefined) updateData.trigger = body.trigger;
@@ -198,7 +204,7 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(cmd);
   });
 
-  fastify.delete<{ Params: { id: string; cmdId: string } }>('/:id/commands/:cmdId', async (req, reply) => {
+  fastify.delete<{ Params: { id: string; cmdId: string } }>('/:id/commands/:cmdId', { preHandler: [requirePermission('bot:update-commands')] }, async (req, reply) => {
     await db.botCommand.delete({ where: { id: req.params.cmdId } });
     invalidateBotCache(req.params.id);
     return reply.status(204).send();
@@ -210,7 +216,7 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(await db.botCrisisConfig.findMany({ where: { botId: req.params.id } }));
   });
 
-  fastify.put<{ Params: { id: string } }>('/:id/crisis-config', async (req, reply) => {
+  fastify.put<{ Params: { id: string } }>('/:id/crisis-config', { preHandler: [requirePermission('bot:update-crisis-config')] }, async (req, reply) => {
     const { configs } = parseBody(CrisisConfigSchema, req.body);
     // Replace all crisis config for this bot
     await db.botCrisisConfig.deleteMany({ where: { botId: req.params.id } });

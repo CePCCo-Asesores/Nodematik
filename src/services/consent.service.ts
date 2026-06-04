@@ -8,17 +8,20 @@ const ACCEPT_ID = 'consent_accept';
 const DECLINE_ID = 'consent_decline';
 
 export async function hasConsent(endUserId: string, botId: string): Promise<boolean> {
+  // Consent must match the current POLICY_VERSION — a version bump forces re-consent
   const consent = await db.consent.findFirst({
-    where: { endUserId, botId },
+    where: { endUserId, botId, policyVersion: config.POLICY_VERSION },
     orderBy: { acceptedAt: 'desc' },
   });
   return consent !== null;
 }
 
 export async function recordConsent(endUserId: string, botId: string): Promise<void> {
-  await db.consent.create({
-    data: { endUserId, botId, policyVersion: config.POLICY_VERSION },
-  });
+  await db.$transaction([
+    db.consent.create({ data: { endUserId, botId, policyVersion: config.POLICY_VERSION } }),
+    // Clear the declined flag when they accept
+    db.endUser.update({ where: { id: endUserId }, data: { consentDeclined: false } }),
+  ]);
 }
 
 export async function sendOnboarding(
@@ -66,8 +69,14 @@ export function isConsentDecline(buttonId: string): boolean {
   return buttonId === DECLINE_ID;
 }
 
+/** Admin-initiated suspension — ignores all future messages. */
 export async function pauseEndUser(endUser: EndUser): Promise<void> {
   await db.endUser.update({ where: { id: endUser.id }, data: { paused: true } });
+}
+
+/** User-initiated consent decline — they can re-consent by writing again. */
+export async function markConsentDeclined(endUserId: string): Promise<void> {
+  await db.endUser.update({ where: { id: endUserId }, data: { consentDeclined: true } });
 }
 
 export async function deleteEndUserData(endUserId: string): Promise<void> {

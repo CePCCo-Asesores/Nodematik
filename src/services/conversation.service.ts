@@ -1,4 +1,4 @@
-import { createHash } from 'crypto';
+import { createHmac, createHash } from 'crypto';
 import type { BotCommand, BotCrisisConfig, BotKnowledge, BotIntegration } from '@prisma/client';
 import { db } from '../db';
 import { decrypt, decryptJson, encrypt } from '../crypto';
@@ -37,13 +37,27 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   const channelCreds = decryptJson<MetaCloudCredentials>(channel.credentials);
   const channelProvider = getChannelProvider(channel.provider);
 
-  // ── Step 3: Resolve / create end_user ───────────────────────────────────
+  // ── Step 2: Resolve / create end_user (upsert prevents race conditions) ─
   const phoneHash = hashPhone(job.from);
-  let endUser = await db.endUser.findFirst({ where: { botId: bot.id, waPhoneHash: phoneHash } });
-  if (!endUser) {
-    endUser = await db.endUser.create({ data: { botId: bot.id, waPhoneHash: phoneHash, locale: bot.locale } });
-  }
+  const endUser = await db.endUser.upsert({
+    where: { botId_waPhoneHash: { botId: bot.id, waPhoneHash: phoneHash } },
+    create: { botId: bot.id, waPhoneHash: phoneHash, locale: bot.locale },
+    update: {},
+  });
+
+  // Admin-paused users are silently dropped
   if (endUser.paused) return;
+
+  // ── Step 3: Pre-consent safety check ────────────────────────────────────
+  // Run keyword safety check BEFORE consent gate so users in crisis always
+  // receive resources, even without prior consent or if they were declined.
+  if (job.messageType === 'text' && job.textBody) {
+    const preSafety = safetyClassifier.classify(job.textBody.trim());
+    if (preSafety.isCrisis) {
+      await handleCrisis(bot.id, bot.crisisConfig, endUser.id, channelProvider, channel.phoneId, channelCreds, job.from, preSafety, 'input_detected_pre_consent');
+      return;
+    }
+  }
 
   // ── Consent: interactive button replies handled first ────────────────────
   if (job.messageType === 'interactive' && job.interactiveReply) {
@@ -51,6 +65,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
     return;
   }
 
+  // Users who previously declined can write again to re-receive onboarding
   const hasConsent = await consentService.hasConsent(endUser.id, bot.id);
   if (!hasConsent) {
     await consentService.sendOnboarding(bot, channelProvider, channel.phoneId, channelCreds, job.from, config.META_API_VERSION);
@@ -61,7 +76,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   if (job.messageType === 'text' && job.textBody) {
     const normalized = job.textBody.trim().toLowerCase();
     if (ARCO_TRIGGERS.some(t => normalized === t || normalized.startsWith(t + ' ') || normalized.endsWith(' ' + t))) {
-      await handleARCORequest(endUser.id, bot.id, channelProvider, channel.phoneId, channelCreds, job.from);
+      await handleARCORequest(endUser.id, channelProvider, channel.phoneId, channelCreds, job.from);
       return;
     }
   }
@@ -90,7 +105,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
 
   if (!inputText) return;
 
-  // ── Step 6: SafetyClassifier on INPUT — platform key, never client LLM ──
+  // ── Step 6: SafetyClassifier on INPUT (full async check with LLM tier) ──
   const inputSafety = await safetyClassifier.classifyAsync(inputText);
   if (inputSafety.isCrisis) {
     await handleCrisis(bot.id, bot.crisisConfig, endUser.id, channelProvider, channel.phoneId, channelCreds, job.from, inputSafety, 'input_detected');
@@ -170,6 +185,12 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function hashPhone(phone: string): string {
+  const secret = config.PHONE_HASH_SECRET;
+  if (secret) {
+    // HMAC-SHA256 with a secret pepper prevents dictionary attacks
+    return createHmac('sha256', secret).update(phone).digest('hex');
+  }
+  // Fallback for dev/test without PHONE_HASH_SECRET configured
   return createHash('sha256').update(phone).digest('hex');
 }
 
@@ -194,8 +215,9 @@ async function handleInteractiveReply(
     await consentService.recordConsent(endUser.id, botId);
     await channelProvider.sendText({ phoneId, accessToken: creds.accessToken, to: job.from, text: '¡Gracias! Ya puedes escribirme.', apiVersion: config.META_API_VERSION });
   } else if (consentService.isConsentDecline(reply.id)) {
-    await consentService.pauseEndUser(endUser as Parameters<typeof consentService.pauseEndUser>[0]);
-    await channelProvider.sendText({ phoneId, accessToken: creds.accessToken, to: job.from, text: 'Entendido. No procesaré tus mensajes. Escríbeme de nuevo si cambias de opinión.', apiVersion: config.META_API_VERSION });
+    // Mark declined (not paused) — user can re-consent by writing again
+    await consentService.markConsentDeclined(endUser.id);
+    await channelProvider.sendText({ phoneId, accessToken: creds.accessToken, to: job.from, text: 'Entendido. Puedes escribirme de nuevo si cambias de opinión.', apiVersion: config.META_API_VERSION });
   }
 }
 
@@ -213,7 +235,6 @@ async function handleFeedbackReply(buttonId: string, endUserId: string): Promise
 
 async function handleARCORequest(
   endUserId: string,
-  botId: string,
   channelProvider: ReturnType<typeof getChannelProvider>,
   phoneId: string,
   creds: MetaCloudCredentials,
@@ -263,14 +284,12 @@ function resolveEmbedderKey(
   llmProvider: string,
   llmApiKeyEnc: Buffer | null | undefined,
 ): string | undefined {
-  // Prefer a dedicated embeddings integration
   const embInt = integrations.find(i => i.kind === 'embeddings' && i.status === 'active');
   if (embInt) {
     try {
       return decryptJson<{ apiKey: string }>(embInt.credentials).apiKey;
     } catch { /* ignore */ }
   }
-  // Fall back to OpenAI LLM key (compatible with text-embedding-3-small)
   if (llmProvider === 'openai' && llmApiKeyEnc) {
     try { return decrypt(llmApiKeyEnc); } catch { /* ignore */ }
   }

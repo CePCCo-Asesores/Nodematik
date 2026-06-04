@@ -10,7 +10,7 @@ function isSamePeriod(a: Date, b: Date): boolean {
  * false if the quota is exceeded (usage is NOT incremented).
  *
  * msg_quota = 0 means unlimited.
- * Concurrent workers are handled safely via a conditional SQL UPDATE.
+ * Concurrent workers are handled safely via conditional SQL UPDATEs.
  */
 export async function tryIncrementQuota(orgId: string): Promise<boolean> {
   const org = await db.organization.findUnique({
@@ -21,13 +21,17 @@ export async function tryIncrementQuota(orgId: string): Promise<boolean> {
 
   const now = new Date();
 
-  // Period rolled over — reset counter and count this message as the first
+  // Period rolled over — atomically reset counter (guards against concurrent workers
+  // both detecting the rollover and both writing msgUsed = 1)
   if (!isSamePeriod(now, org.currentPeriodStart)) {
-    await db.organization.update({
-      where: { id: orgId },
-      data: { msgUsed: 1, currentPeriodStart: now },
-    });
-    return true;
+    const resetAffected: number = await db.$executeRaw`
+      UPDATE organizations
+      SET msg_used = 1, current_period_start = NOW()
+      WHERE id = ${orgId}
+        AND DATE_TRUNC('month', current_period_start) < DATE_TRUNC('month', NOW())
+    `;
+    if (resetAffected > 0) return true;
+    // Another worker already reset the period — fall through to normal check
   }
 
   // Unlimited org — just increment

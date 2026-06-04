@@ -6,16 +6,17 @@ import { parseBody, RegisterSchema, LoginSchema } from '../lib/validate';
 const authRoutes: FastifyPluginAsync = async (fastify) => {
   // Create org + owner account
   fastify.post('/register', async (req, reply) => {
-    const { email, password, orgName } = parseBody(RegisterSchema, req.body);
+    const body = parseBody(RegisterSchema, req.body);
+    const email = body.email.trim().toLowerCase();
 
     const existing = await db.orgUser.findFirst({ where: { email } });
     if (existing) return reply.status(409).send({ error: 'Email already registered' });
 
-    const passwordHash = await hashPassword(password);
+    const passwordHash = await hashPassword(body.password);
 
     // Wrap org + user creation in a transaction — partial failure leaves no orphaned org
     const { org, user } = await db.$transaction(async (tx) => {
-      const org = await tx.organization.create({ data: { name: orgName } });
+      const org = await tx.organization.create({ data: { name: body.orgName } });
       const user = await tx.orgUser.create({
         data: { orgId: org.id, email, passwordHash, role: 'owner' },
       });
@@ -28,12 +29,13 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
   // Login
   fastify.post('/login', async (req, reply) => {
-    const { email, password } = parseBody(LoginSchema, req.body);
+    const body = parseBody(LoginSchema, req.body);
+    const email = body.email.trim().toLowerCase();
 
     const user = await db.orgUser.findFirst({ where: { email } });
     if (!user) return reply.status(401).send({ error: 'Invalid credentials' });
 
-    const valid = await verifyPassword(password, user.passwordHash);
+    const valid = await verifyPassword(body.password, user.passwordHash);
     if (!valid) return reply.status(401).send({ error: 'Invalid credentials' });
 
     const token = signToken({ sub: user.id, orgId: user.orgId, role: user.role });

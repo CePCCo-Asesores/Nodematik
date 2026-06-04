@@ -82,7 +82,7 @@ function makeReply() {
 
 describe('requireAuth middleware', () => {
   it('sets superadmin user for ADMIN_API_KEY via x-admin-key', async () => {
-    const req = makeReq({ 'x-admin-key': 'test-admin-key' });
+    const req = makeReq({ 'x-admin-key': 'test-admin-key-must-be-at-least-32-chars-long!!' });
     const reply = makeReply();
     await requireAuth(req, reply as unknown as FastifyReply);
     expect(req.user?.isSuperadmin).toBe(true);
@@ -91,7 +91,7 @@ describe('requireAuth middleware', () => {
   });
 
   it('sets superadmin user for ADMIN_API_KEY via Authorization Bearer', async () => {
-    const req = makeReq({ authorization: 'Bearer test-admin-key' });
+    const req = makeReq({ authorization: 'Bearer test-admin-key-must-be-at-least-32-chars-long!!' });
     const reply = makeReply();
     await requireAuth(req, reply as unknown as FastifyReply);
     expect(req.user?.isSuperadmin).toBe(true);

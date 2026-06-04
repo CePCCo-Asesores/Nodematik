@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { db } from '../../db';
 import { encryptJson, decryptJson } from '../../crypto';
 import { invalidateBotCache } from '../../services/bot.service';
+import { requirePermission } from '../../lib/rbac';
 import { parseBody, CreateIntegrationSchema, UpdateIntegrationSchema } from '../../lib/validate';
 
 const integrationRoutes: FastifyPluginAsync = async (fastify) => {
@@ -12,7 +13,7 @@ const integrationRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Add integration
-  fastify.post<{ Params: { botId: string } }>('/:botId/integrations', async (req, reply) => {
+  fastify.post<{ Params: { botId: string } }>('/:botId/integrations', { preHandler: [requirePermission('integration:manage')] }, async (req, reply) => {
     const { botId } = req.params;
     const { kind, provider, apiKey, ...extra } = parseBody(CreateIntegrationSchema, req.body);
     const integration = await db.botIntegration.create({
@@ -23,7 +24,7 @@ const integrationRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Update integration (e.g. rotate key)
-  fastify.put<{ Params: { botId: string; integrationId: string } }>('/:botId/integrations/:integrationId', async (req, reply) => {
+  fastify.put<{ Params: { botId: string; integrationId: string } }>('/:botId/integrations/:integrationId', { preHandler: [requirePermission('integration:manage')] }, async (req, reply) => {
     const { botId, integrationId } = req.params;
     const body = parseBody(UpdateIntegrationSchema, req.body);
 
@@ -43,7 +44,7 @@ const integrationRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Delete integration
-  fastify.delete<{ Params: { botId: string; integrationId: string } }>('/:botId/integrations/:integrationId', async (req, reply) => {
+  fastify.delete<{ Params: { botId: string; integrationId: string } }>('/:botId/integrations/:integrationId', { preHandler: [requirePermission('integration:manage')] }, async (req, reply) => {
     const { botId, integrationId } = req.params;
     const existing = await db.botIntegration.findUnique({ where: { id: integrationId } });
     if (!existing || existing.botId !== botId) return reply.status(404).send({ error: 'Integration not found' });

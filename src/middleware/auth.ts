@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'crypto';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { verifyToken } from '../services/auth.service';
 import { config } from '../config';
@@ -15,6 +16,14 @@ declare module 'fastify' {
   }
 }
 
+function isValidAdminKey(token: string): boolean {
+  const tokenBuf = Buffer.from(token);
+  const keyBuf = Buffer.from(config.ADMIN_API_KEY);
+  // Length check first (timingSafeEqual requires same length)
+  if (tokenBuf.length !== keyBuf.length) return false;
+  return timingSafeEqual(tokenBuf, keyBuf);
+}
+
 export async function requireAuth(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   const rawKey = req.headers['x-admin-key'] as string | undefined;
   const bearerToken = req.headers['authorization']?.replace(/^Bearer\s+/i, '');
@@ -22,7 +31,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply): Pro
 
   if (!token) return reply.status(401).send({ error: 'Unauthorized' });
 
-  if (token === config.ADMIN_API_KEY) {
+  if (isValidAdminKey(token)) {
     req.user = { userId: 'superadmin', orgId: '*', role: 'owner', isSuperadmin: true };
     return;
   }

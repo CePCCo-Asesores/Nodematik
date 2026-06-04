@@ -57,14 +57,13 @@ describe('tryIncrementQuota', () => {
     const lastMonth = new Date();
     lastMonth.setMonth(lastMonth.getMonth() - 1);
     db.organization.findUnique.mockResolvedValue(makeOrg({ msgUsed: 999, currentPeriodStart: lastMonth }));
+    db.$executeRaw.mockResolvedValue(1); // atomic rollover reset affects 1 row
 
     const result = await tryIncrementQuota('org-1');
     expect(result).toBe(true);
-    expect(db.organization.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ msgUsed: 1 }) }),
-    );
-    // Should NOT use the atomic conditional path after period reset
-    expect(db.$executeRaw).not.toHaveBeenCalled();
+    // Rollover uses a single atomic $executeRaw (not organization.update)
+    expect(db.$executeRaw).toHaveBeenCalled();
+    expect(db.organization.update).not.toHaveBeenCalled();
   });
 
   it('returns true (fail open) when org is not found', async () => {

@@ -3,6 +3,7 @@ import { db } from '../../db';
 import { invalidateBotCache } from '../../services/bot.service';
 import { generateEmbedding, encodeEmbedding } from '../../services/knowledge.service';
 import { decrypt, decryptJson } from '../../crypto';
+import { requirePermission } from '../../lib/rbac';
 import { parseBody, KnowledgeSchema, UpdateKnowledgeSchema } from '../../lib/validate';
 
 const knowledgeRoutes: FastifyPluginAsync = async (fastify) => {
@@ -14,7 +15,7 @@ const knowledgeRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(items);
   });
 
-  fastify.post<{ Params: { botId: string } }>('/:botId/knowledge', async (req, reply) => {
+  fastify.post<{ Params: { botId: string } }>('/:botId/knowledge', { preHandler: [requirePermission('bot:update-knowledge')] }, async (req, reply) => {
     const { title, content, tags } = parseBody(KnowledgeSchema, req.body);
     const item = await db.botKnowledge.create({
       data: { botId: req.params.botId, title, content, tags: tags ?? [] },
@@ -23,7 +24,11 @@ const knowledgeRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.status(201).send(item);
   });
 
-  fastify.put<{ Params: { botId: string; itemId: string } }>('/:botId/knowledge/:itemId', async (req, reply) => {
+  fastify.put<{ Params: { botId: string; itemId: string } }>('/:botId/knowledge/:itemId', { preHandler: [requirePermission('bot:update-knowledge')] }, async (req, reply) => {
+    const { botId, itemId } = req.params;
+    const existing = await db.botKnowledge.findUnique({ where: { id: itemId }, select: { botId: true } });
+    if (!existing || existing.botId !== botId) return reply.status(404).send({ error: 'Knowledge item not found' });
+
     const body = parseBody(UpdateKnowledgeSchema, req.body);
     const data: Record<string, unknown> = {};
     if (body.title !== undefined) data.title = body.title;
@@ -34,20 +39,23 @@ const knowledgeRoutes: FastifyPluginAsync = async (fastify) => {
       data.hasEmbedding = false;
     }
     if (body.tags !== undefined) data.tags = body.tags;
-    const item = await db.botKnowledge.update({ where: { id: req.params.itemId }, data });
-    invalidateBotCache(req.params.botId);
+    const item = await db.botKnowledge.update({ where: { id: itemId }, data });
+    invalidateBotCache(botId);
     return reply.send(item);
   });
 
-  fastify.delete<{ Params: { botId: string; itemId: string } }>('/:botId/knowledge/:itemId', async (req, reply) => {
-    await db.botKnowledge.delete({ where: { id: req.params.itemId } });
-    invalidateBotCache(req.params.botId);
+  fastify.delete<{ Params: { botId: string; itemId: string } }>('/:botId/knowledge/:itemId', { preHandler: [requirePermission('bot:update-knowledge')] }, async (req, reply) => {
+    const { botId, itemId } = req.params;
+    const existing = await db.botKnowledge.findUnique({ where: { id: itemId }, select: { botId: true } });
+    if (!existing || existing.botId !== botId) return reply.status(404).send({ error: 'Knowledge item not found' });
+    await db.botKnowledge.delete({ where: { id: itemId } });
+    invalidateBotCache(botId);
     return reply.status(204).send();
   });
 
   // Generate / refresh embeddings for all knowledge entries of a bot.
   // Uses the bot's OpenAI LLM key if available; otherwise a dedicated embeddings integration.
-  fastify.post<{ Params: { botId: string } }>('/:botId/knowledge/embed', async (req, reply) => {
+  fastify.post<{ Params: { botId: string } }>('/:botId/knowledge/embed', { preHandler: [requirePermission('bot:update-knowledge')] }, async (req, reply) => {
     const bot = await db.bot.findUnique({
       where: { id: req.params.botId },
       include: { knowledge: true, integrations: { where: { kind: 'embeddings', status: 'active' } } },

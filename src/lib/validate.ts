@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { REGISTERED_PROVIDERS } from '../providers/llm';
 
 /**
  * Parse and validate a request body against a Zod schema.
@@ -48,7 +49,7 @@ export const CreateBotSchema = z.object({
   identity: z.record(z.unknown()).optional(),
   onboardingMsg: z.string().optional(),
   historyWindow: z.number().int().min(1).max(50).optional(),
-  llmProvider: z.string().optional(),
+  llmProvider: z.enum(REGISTERED_PROVIDERS).optional(),
   llmModel: z.string().optional(),
   llmApiKey: z.string().optional(),
   llmParams: z.record(z.unknown()).optional(),
@@ -62,7 +63,7 @@ export const UpdateBotSchema = z.object({
   identity: z.record(z.unknown()).optional(),
   onboardingMsg: z.string().optional(),
   historyWindow: z.number().int().min(1).max(50).optional(),
-  llmProvider: z.string().optional(),
+  llmProvider: z.enum(REGISTERED_PROVIDERS).optional(),
   llmModel: z.string().optional(),
   llmApiKey: z.string().optional(),
   llmParams: z.record(z.unknown()).optional(),
@@ -171,4 +172,14 @@ export const UpdateKnowledgeSchema = z.object({
 
 export const PatchUserSchema = z.object({
   paused: z.boolean(),
+});
+
+// ── Proactive ─────────────────────────────────────────────────────────────
+
+export const ProactiveSchema = z.object({
+  to: z.string().min(1),
+  templateName: z.string().min(1),
+  languageCode: z.string().min(2),
+  components: z.array(z.unknown()).optional(),
+  channelId: z.string().uuid().optional(),
 });

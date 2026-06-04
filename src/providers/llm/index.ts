@@ -5,6 +5,9 @@ import { OpenAIProvider } from './openai';
 export { LLMCredentialError, LLMRateLimitError } from './types';
 export type { LLMProvider };
 
+export const REGISTERED_PROVIDERS = ['anthropic', 'openai'] as const;
+export type RegisteredProvider = typeof REGISTERED_PROVIDERS[number];
+
 const registry = new Map<string, LLMProvider>();
 
 registry.set('anthropic', new AnthropicProvider());

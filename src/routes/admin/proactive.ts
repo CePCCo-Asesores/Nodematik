@@ -2,6 +2,8 @@ import type { FastifyPluginAsync } from 'fastify';
 import { db } from '../../db';
 import { decryptJson } from '../../crypto';
 import { getChannelProvider } from '../../providers/channel';
+import { requirePermission } from '../../lib/rbac';
+import { parseBody, ProactiveSchema } from '../../lib/validate';
 import { config } from '../../config';
 import type { MetaCloudCredentials } from '../../types';
 
@@ -10,11 +12,13 @@ import type { MetaCloudCredentials } from '../../types';
 // within 24h of a user-initiated conversation; templates bypass this.
 
 const proactiveRoutes: FastifyPluginAsync = async (fastify) => {
-  fastify.post<{ Params: { botId: string }; Body: ProactiveBody }>('/:botId/proactive', async (req, reply) => {
+  fastify.post<{ Params: { botId: string } }>('/:botId/proactive', {
+    preHandler: [requirePermission('proactive:send')],
+  }, async (req, reply) => {
     const { botId } = req.params;
-    const { to, templateName, languageCode, components, channelId } = req.body;
+    const { to, templateName, languageCode, components, channelId } = parseBody(ProactiveSchema, req.body);
 
-    // Load the channel — either the one specified or the first active channel of the bot
+    // If channelId is provided, verify it belongs to this bot (IDOR guard)
     const channel = channelId
       ? await db.channel.findFirst({ where: { id: channelId, botId } })
       : await db.channel.findFirst({ where: { botId, status: 'connected' } });
@@ -37,13 +41,5 @@ const proactiveRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send({ sent: true, to, templateName });
   });
 };
-
-interface ProactiveBody {
-  to: string;
-  templateName: string;
-  languageCode: string;
-  components?: unknown[];
-  channelId?: string;
-}
 
 export default proactiveRoutes;

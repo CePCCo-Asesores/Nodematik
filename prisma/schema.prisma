@@ -166,12 +166,13 @@ model BotIntegration {
 }
 
 model EndUser {
-  id          String   @id @default(uuid())
-  botId       String   @map("bot_id")
-  waPhoneHash String   @map("wa_phone_hash") // SHA-256 of WA phone — never stored in clear
-  locale      String?
-  paused      Boolean  @default(false)
-  createdAt   DateTime @default(now()) @map("created_at")
+  id               String   @id @default(uuid())
+  botId            String   @map("bot_id")
+  waPhoneHash      String   @map("wa_phone_hash") // HMAC-SHA256(phone, PHONE_HASH_SECRET) — never stored in clear
+  locale           String?
+  paused           Boolean  @default(false)
+  consentDeclined  Boolean  @default(false) @map("consent_declined")
+  createdAt        DateTime @default(now()) @map("created_at")
 
   bot          Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
   consents     Consent[]

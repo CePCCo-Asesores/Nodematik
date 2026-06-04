@@ -40,13 +40,11 @@ const webhookRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(401).send('Invalid signature');
     }
 
-    // ACK immediately — Meta requires < 5 s response
-    reply.status(200).send('EVENT_RECEIVED');
+    // Enqueue BEFORE ACK — if Redis is unavailable we return 500 so Meta retries.
+    // BullMQ enqueue is sub-millisecond so this stays well within Meta's 5 s window.
+    await processPayload(req.body);
 
-    // Parse + enqueue asynchronously (fire-and-forget, errors logged)
-    processPayload(req.body).catch((err: Error) => {
-      fastify.log.error({ err: err.message }, 'webhook payload processing error');
-    });
+    return reply.status(200).send('EVENT_RECEIVED');
   });
 };
 

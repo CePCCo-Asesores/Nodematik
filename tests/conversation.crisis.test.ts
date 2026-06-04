@@ -13,12 +13,13 @@ const { mockSendText, mockLLMComplete, mockLoadChannel } = vi.hoisted(() => ({
 
 vi.mock('../src/db', () => ({
   db: {
-    endUser: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    endUser: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), upsert: vi.fn() },
     consent: { findFirst: vi.fn(), create: vi.fn(), deleteMany: vi.fn() },
     message: { create: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn() },
     crisisEvent: { create: vi.fn(), deleteMany: vi.fn() },
     bot: { update: vi.fn() },
     feedback: { deleteMany: vi.fn() },
+    $transaction: vi.fn((ops: unknown[]) => Promise.all(ops)),
   },
 }));
 
@@ -94,7 +95,7 @@ const mockChannel = {
   bot: mockBot,
 };
 
-const mockEndUser = { id: 'user-1', botId: 'bot-uuid-1', waPhoneHash: 'hash', paused: false, locale: 'es-MX', createdAt: new Date() };
+const mockEndUser = { id: 'user-1', botId: 'bot-uuid-1', waPhoneHash: 'hash', paused: false, consentDeclined: false, locale: 'es-MX', createdAt: new Date() };
 const mockConsent = { id: 'consent-1', endUserId: 'user-1', botId: 'bot-uuid-1', acceptedAt: new Date(), policyVersion: '1.0' };
 
 function makeJob(text: string): InboundMessageJob {
@@ -116,7 +117,7 @@ describe('Crisis flow — LLM is never called', () => {
 
     const dbMod = await import('../src/db');
     db = dbMod.db as typeof db;
-    db.endUser.findFirst.mockResolvedValue(mockEndUser);
+    db.endUser.upsert.mockResolvedValue(mockEndUser);
     db.consent.findFirst.mockResolvedValue(mockConsent);
     db.crisisEvent.create.mockResolvedValue({});
     db.message.findMany.mockResolvedValue([]);
@@ -150,9 +151,10 @@ describe('Crisis flow — LLM is never called', () => {
   it('records a crisis_event in the database', async () => {
     const { processInboundMessage } = await import('../src/services/conversation.service');
     await processInboundMessage(makeJob('me quiero matar'));
+    // Pre-consent safety check fires before the consent gate, so actionTaken is 'input_detected_pre_consent'
     expect(db.crisisEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ botId: 'bot-uuid-1', actionTaken: 'input_detected' }),
+        data: expect.objectContaining({ botId: 'bot-uuid-1', actionTaken: 'input_detected_pre_consent' }),
       }),
     );
   });

@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { db } from '../../db';
 import { deleteEndUserData } from '../../services/consent.service';
+import { requirePermission } from '../../lib/rbac';
 import { parseBody, PatchUserSchema } from '../../lib/validate';
 
 const userRoutes: FastifyPluginAsync = async (fastify) => {
@@ -18,7 +19,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Delete all data for an end user (Derecho ARCO — right to erasure)
-  fastify.delete<{ Params: { botId: string; userId: string } }>('/:botId/users/:userId/data', async (req, reply) => {
+  fastify.delete<{ Params: { botId: string; userId: string } }>('/:botId/users/:userId/data', { preHandler: [requirePermission('user:erase')] }, async (req, reply) => {
     const { botId, userId } = req.params;
 
     const user = await db.endUser.findUnique({ where: { id: userId } });
@@ -31,7 +32,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Suspend / unsuspend an end user
-  fastify.patch<{ Params: { botId: string; userId: string } }>('/:botId/users/:userId', async (req, reply) => {
+  fastify.patch<{ Params: { botId: string; userId: string } }>('/:botId/users/:userId', { preHandler: [requirePermission('user:suspend')] }, async (req, reply) => {
     const { botId, userId } = req.params;
     const { paused } = parseBody(PatchUserSchema, req.body);
 

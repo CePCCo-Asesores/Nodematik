@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { db } from '../../db';
 import { encryptJson, decryptJson } from '../../crypto';
 import { invalidateBotCache } from '../../services/bot.service';
+import { requirePermission } from '../../lib/rbac';
 import { config } from '../../config';
 import { parseBody, CreateChannelSchema, UpdateChannelSchema, EmbeddedSignupSchema } from '../../lib/validate';
 import type { MetaCloudCredentials } from '../../types';
@@ -14,7 +15,7 @@ const channelRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Add channel to a bot
-  fastify.post<{ Params: { botId: string } }>('/:botId/channels', async (req, reply) => {
+  fastify.post<{ Params: { botId: string } }>('/:botId/channels', { preHandler: [requirePermission('channel:manage')] }, async (req, reply) => {
     const { botId } = req.params;
     const { provider, phoneId, accessToken, businessAccountId, verifyToken } = parseBody(CreateChannelSchema, req.body);
 
@@ -28,12 +29,12 @@ const channelRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Update channel (rotate token, change status)
-  fastify.put<{ Params: { botId: string; channelId: string } }>('/:botId/channels/:channelId', async (req, reply) => {
+  fastify.put<{ Params: { botId: string; channelId: string } }>('/:botId/channels/:channelId', { preHandler: [requirePermission('channel:manage')] }, async (req, reply) => {
     const { botId, channelId } = req.params;
     const body = parseBody(UpdateChannelSchema, req.body);
 
     const existing = await db.channel.findUnique({ where: { id: channelId } });
-    if (!existing) return reply.status(404).send({ error: 'Channel not found' });
+    if (!existing || existing.botId !== botId) return reply.status(404).send({ error: 'Channel not found' });
 
     const data: Record<string, unknown> = {};
     if (body.status !== undefined) data.status = body.status;
@@ -55,14 +56,17 @@ const channelRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Delete channel
-  fastify.delete<{ Params: { botId: string; channelId: string } }>('/:botId/channels/:channelId', async (req, reply) => {
-    await db.channel.delete({ where: { id: req.params.channelId } });
-    invalidateBotCache(req.params.botId);
+  fastify.delete<{ Params: { botId: string; channelId: string } }>('/:botId/channels/:channelId', { preHandler: [requirePermission('channel:manage')] }, async (req, reply) => {
+    const { botId, channelId } = req.params;
+    const existing = await db.channel.findUnique({ where: { id: channelId }, select: { botId: true } });
+    if (!existing || existing.botId !== botId) return reply.status(404).send({ error: 'Channel not found' });
+    await db.channel.delete({ where: { id: channelId } });
+    invalidateBotCache(botId);
     return reply.status(204).send();
   });
 
   // ── Meta Embedded Signup ─────────────────────────────────────────────────
-  fastify.post<{ Params: { botId: string } }>('/:botId/channels/embedded-signup', async (req, reply) => {
+  fastify.post<{ Params: { botId: string } }>('/:botId/channels/embedded-signup', { preHandler: [requirePermission('channel:manage')] }, async (req, reply) => {
     if (!config.META_APP_ID) {
       return reply.status(501).send({ error: 'META_APP_ID not configured — Embedded Signup is unavailable' });
     }
