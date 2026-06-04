@@ -1,16 +1,15 @@
-import type { Bot, BotBranding, BotCommand, BotCrisisConfig, BotKnowledge, Channel } from '@prisma/client';
+import type { Bot, BotBranding, BotCommand, BotCrisisConfig, BotIntegration, BotKnowledge, Channel } from '@prisma/client';
 import { db } from '../db';
 
-// Full bot config loaded from DB — includes all related tables needed by the engine
 export type BotWithRelations = Bot & {
   branding: BotBranding | null;
   commands: BotCommand[];
   crisisConfig: BotCrisisConfig[];
   channels: Channel[];
   knowledge: BotKnowledge[];
+  integrations: BotIntegration[];
 };
 
-// Channel + its bot loaded by phoneId — the primary routing lookup
 export type ChannelWithBot = Channel & {
   bot: BotWithRelations;
 };
@@ -32,6 +31,7 @@ const BOT_INCLUDES = {
   crisisConfig: true,
   channels: true,
   knowledge: true,
+  integrations: true,
 } as const;
 
 export async function loadChannelByPhoneId(phoneId: string): Promise<ChannelWithBot | null> {
@@ -72,10 +72,8 @@ export async function loadBotById(botId: string): Promise<BotWithRelations | nul
   return entry.value;
 }
 
-// Call after any bot mutation so the next request gets fresh data
 export function invalidateBotCache(botId: string): void {
   botCache.delete(botId);
-  // Also invalidate any channel entries pointing at this bot
   for (const [key, entry] of channelCache) {
     if (entry.value.botId === botId) channelCache.delete(key);
   }

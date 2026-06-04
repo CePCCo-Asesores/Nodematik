@@ -110,11 +110,13 @@ model BotCommand {
 }
 
 model BotKnowledge {
-  id      String   @id @default(uuid())
-  botId   String   @map("bot_id")
-  title   String
-  content String
-  tags    String[]
+  id            String   @id @default(uuid())
+  botId         String   @map("bot_id")
+  title         String
+  content       String
+  tags          String[]
+  embeddingData Bytes?   @map("embedding_data") // Float32Array — cosine similarity, no pgvector needed
+  hasEmbedding  Boolean  @default(false) @map("has_embedding")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
 

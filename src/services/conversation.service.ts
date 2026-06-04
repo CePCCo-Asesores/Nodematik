@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import type { BotCommand, BotCrisisConfig, BotKnowledge } from '@prisma/client';
+import type { BotCommand, BotCrisisConfig, BotKnowledge, BotIntegration } from '@prisma/client';
 import { db } from '../db';
 import { decrypt, decryptJson, encrypt } from '../crypto';
 import { config } from '../config';
@@ -7,37 +7,36 @@ import { loadChannelByPhoneId, invalidateBotCache } from './bot.service';
 import { safetyClassifier } from './safety.service';
 import { notifyCredentialError } from './notification.service';
 import * as consentService from './consent.service';
+import { getRelevantKnowledge } from './knowledge.service';
+import { downloadMedia } from './media.service';
 import { getLLMProvider, LLMCredentialError, LLMRateLimitError } from '../providers/llm';
 import { getChannelProvider } from '../providers/channel';
+import { getTranscriber, SttCredentialError } from '../providers/stt';
 import type { InboundMessageJob, LLMMessage, MetaCloudCredentials, ClassificationResult } from '../types';
 
-// Triggers that invoke the ARCO data-erasure right (Spanish + English)
 const ARCO_TRIGGERS = [
-  'borrar mis datos',
-  'eliminar mis datos',
-  'borrar mi historial',
-  'eliminar mi historial',
-  'delete my data',
-  'delete my history',
-  'arco',
-  'olvidame',
-  'olvídame',
+  'borrar mis datos', 'eliminar mis datos', 'borrar mi historial',
+  'eliminar mi historial', 'delete my data', 'delete my history',
+  'arco', 'olvidame', 'olvídame',
 ];
 
+// Feedback button ID prefix and sentiment map
+const FB_PREFIX = 'fb_';
+const FB_RATINGS: Record<string, number> = { good: 5, ok: 3, bad: 1 };
+
 export async function processInboundMessage(job: InboundMessageJob): Promise<void> {
-  // ── Step 1: Identify bot by phone_id ─────────────────────────────────────
+  // ── Step 1: Identify bot ─────────────────────────────────────────────────
   const channelWithBot = await loadChannelByPhoneId(job.phoneId);
   if (!channelWithBot) return;
 
   const { bot } = channelWithBot;
   const channel = channelWithBot;
-
   if (bot.status === 'paused') return;
 
   const channelCreds = decryptJson<MetaCloudCredentials>(channel.credentials);
   const channelProvider = getChannelProvider(channel.provider);
 
-  // ── Step 3: Resolve / create end_user ────────────────────────────────────
+  // ── Step 3: Resolve / create end_user ───────────────────────────────────
   const phoneHash = hashPhone(job.from);
   let endUser = await db.endUser.findFirst({ where: { botId: bot.id, waPhoneHash: phoneHash } });
   if (!endUser) {
@@ -45,7 +44,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   }
   if (endUser.paused) return;
 
-  // ── Consent: interactive button replies handled first ─────────────────────
+  // ── Consent: interactive button replies handled first ────────────────────
   if (job.messageType === 'interactive' && job.interactiveReply) {
     await handleInteractiveReply(job, endUser, bot.id, channelProvider, channel.phoneId, channelCreds);
     return;
@@ -57,8 +56,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
     return;
   }
 
-  // ── ARCO self-service erasure (Derecho ARCO — LFPDPPP art. 28) ───────────
-  // Must run before command dispatch and before the LLM is ever called.
+  // ── ARCO self-service erasure ────────────────────────────────────────────
   if (job.messageType === 'text' && job.textBody) {
     const normalized = job.textBody.trim().toLowerCase();
     if (ARCO_TRIGGERS.some(t => normalized === t || normalized.startsWith(t + ' ') || normalized.endsWith(' ' + t))) {
@@ -67,7 +65,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
     }
   }
 
-  // ── Step 4: Check for configured command ──────────────────────────────────
+  // ── Step 4: Configured commands ──────────────────────────────────────────
   if (job.messageType === 'text' && job.textBody) {
     const command = matchCommand(bot.commands, job.textBody);
     if (command) {
@@ -76,29 +74,34 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
     }
   }
 
-  // ── Step 5: Voice → text (Phase 5) ───────────────────────────────────────
+  // ── Step 5: Voice → STT ──────────────────────────────────────────────────
+  let inputText = job.textBody?.trim() ?? '';
+
   if (job.messageType === 'audio') {
-    await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: 'Lo siento, los mensajes de voz aún no están disponibles.', apiVersion: config.META_API_VERSION });
-    return;
+    if (!job.audioId) return;
+    const sttResult = await transcribeAudio(bot.integrations, job.audioId, channelCreds.accessToken, bot.locale ?? 'es');
+    if (!sttResult.ok) {
+      await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: sttResult.errorMessage, apiVersion: config.META_API_VERSION });
+      return;
+    }
+    inputText = sttResult.text;
   }
 
-  const inputText = job.textBody?.trim() ?? '';
   if (!inputText) return;
 
-  // ── Step 6: SafetyClassifier on INPUT — platform-controlled, NOT client LLM ─
-  // Uses async classification: keyword rules first, then LLM if SAFETY_PROVIDER_API_KEY is set.
-  // The client's model is NEVER called before this check passes.
+  // ── Step 6: SafetyClassifier on INPUT — platform key, never client LLM ──
   const inputSafety = await safetyClassifier.classifyAsync(inputText);
   if (inputSafety.isCrisis) {
     await handleCrisis(bot.id, bot.crisisConfig, endUser.id, channelProvider, channel.phoneId, channelCreds, job.from, inputSafety, 'input_detected');
     return;
   }
 
-  // ── Step 7: Retrieve history + relevant knowledge ─────────────────────────
+  // ── Step 7: History + knowledge ──────────────────────────────────────────
   const history = await getHistory(bot.id, endUser.id, bot.historyWindow);
-  const knowledge = getRelevantKnowledge(bot.knowledge, inputText);
+  const embedderKey = resolveEmbedderKey(bot.integrations, bot.llmProvider ?? '', bot.llmApiKeyEnc);
+  const knowledge = await getRelevantKnowledge(bot.knowledge, inputText, embedderKey);
 
-  // ── Step 8: LLM call (client's provider + client's key) ──────────────────
+  // ── Step 8: LLM (client's provider + client's key) ───────────────────────
   if (!bot.llmProvider || !bot.llmModel || !bot.llmApiKeyEnc) {
     await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: 'El servicio no está configurado aún. Intenta más tarde.', apiVersion: config.META_API_VERSION });
     return;
@@ -108,7 +111,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   const apiKey = decrypt(bot.llmApiKeyEnc);
   const systemPrompt = buildSystemPrompt(bot.systemPrompt ?? '', knowledge, bot.branding);
 
-  await persistMessage(bot.id, endUser.id, 'in', job.messageType === 'text' ? 'text' : 'interactive', inputText, job.waMessageId);
+  await persistMessage(bot.id, endUser.id, 'in', job.messageType === 'audio' ? 'voice' : 'text', inputText, job.waMessageId);
 
   let responseText: string;
   try {
@@ -126,19 +129,34 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
     return;
   }
 
-  // ── Step 9: SafetyClassifier on OUTPUT ────────────────────────────────────
-  // Sync is sufficient here — the costly async check already cleared the input.
+  // ── Step 9: SafetyClassifier on OUTPUT ───────────────────────────────────
   const outputSafety = safetyClassifier.classify(responseText);
   if (outputSafety.isCrisis) {
     responseText = buildCrisisMessage(bot.crisisConfig);
     await recordCrisisEvent(bot.id, endUser.id, outputSafety.category ?? 'unknown', 'output_filtered');
   }
 
-  // ── Step 10: Persist outbound message ────────────────────────────────────
-  await persistMessage(bot.id, endUser.id, 'out', 'text', responseText);
-
-  // ── Step 11: Send to WhatsApp ─────────────────────────────────────────────
+  // ── Step 10: Persist + send ───────────────────────────────────────────────
+  const outMsg = await persistMessage(bot.id, endUser.id, 'out', 'text', responseText);
   await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: responseText, apiVersion: config.META_API_VERSION });
+
+  // ── Optional feedback collection ─────────────────────────────────────────
+  const identity = bot.identity as Record<string, unknown> | null;
+  if (identity?.collectFeedback === true && outMsg) {
+    const prompt = typeof identity.feedbackPrompt === 'string' ? identity.feedbackPrompt : '¿Fue útil esta respuesta?';
+    channelProvider.sendInteractive({
+      phoneId: channel.phoneId,
+      accessToken: channelCreds.accessToken,
+      to: job.from,
+      bodyText: prompt,
+      buttons: [
+        { id: `${FB_PREFIX}good_${outMsg.id}`, title: '👍 Útil' },
+        { id: `${FB_PREFIX}ok_${outMsg.id}`, title: '🤔 Regular' },
+        { id: `${FB_PREFIX}bad_${outMsg.id}`, title: '👎 No útil' },
+      ],
+      apiVersion: config.META_API_VERSION,
+    }).catch(() => { /* non-critical */ });
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -156,6 +174,14 @@ async function handleInteractiveReply(
   creds: MetaCloudCredentials,
 ): Promise<void> {
   const reply = job.interactiveReply!;
+
+  // Feedback reply
+  if (reply.id.startsWith(FB_PREFIX)) {
+    await handleFeedbackReply(reply.id, endUser.id);
+    return;
+  }
+
+  // Consent reply
   if (consentService.isConsentAccept(reply.id)) {
     await consentService.recordConsent(endUser.id, botId);
     await channelProvider.sendText({ phoneId, accessToken: creds.accessToken, to: job.from, text: '¡Gracias! Ya puedes escribirme.', apiVersion: config.META_API_VERSION });
@@ -163,6 +189,18 @@ async function handleInteractiveReply(
     await consentService.pauseEndUser(endUser as Parameters<typeof consentService.pauseEndUser>[0]);
     await channelProvider.sendText({ phoneId, accessToken: creds.accessToken, to: job.from, text: 'Entendido. No procesaré tus mensajes. Escríbeme de nuevo si cambias de opinión.', apiVersion: config.META_API_VERSION });
   }
+}
+
+async function handleFeedbackReply(buttonId: string, endUserId: string): Promise<void> {
+  // Format: fb_{good|ok|bad}_{messageId}
+  const withoutPrefix = buttonId.slice(FB_PREFIX.length);
+  const underscoreIdx = withoutPrefix.indexOf('_');
+  if (underscoreIdx === -1) return;
+  const sentiment = withoutPrefix.slice(0, underscoreIdx);
+  const messageId = withoutPrefix.slice(underscoreIdx + 1);
+  const rating = FB_RATINGS[sentiment];
+  if (rating === undefined || !messageId) return;
+  await db.feedback.create({ data: { messageId, endUserId, rating } }).catch(() => { /* message may no longer exist */ });
 }
 
 async function handleARCORequest(
@@ -175,12 +213,60 @@ async function handleARCORequest(
 ): Promise<void> {
   await consentService.deleteEndUserData(endUserId, botId);
   await channelProvider.sendText({
-    phoneId,
-    accessToken: creds.accessToken,
-    to,
+    phoneId, accessToken: creds.accessToken, to,
     text: 'Tu historial de conversación y datos han sido eliminados conforme a tu solicitud (Derecho ARCO). Si deseas continuar usando el servicio, escríbeme de nuevo.',
     apiVersion: config.META_API_VERSION,
   });
+}
+
+async function transcribeAudio(
+  integrations: BotIntegration[],
+  audioId: string,
+  channelAccessToken: string,
+  locale: string,
+): Promise<{ ok: true; text: string } | { ok: false; errorMessage: string }> {
+  const sttIntegration = integrations.find(i => i.kind === 'stt' && i.status === 'active');
+  if (!sttIntegration) {
+    return { ok: false, errorMessage: 'Los mensajes de voz no están habilitados para este servicio.' };
+  }
+
+  let sttCreds: { apiKey: string };
+  try {
+    sttCreds = decryptJson<{ apiKey: string }>(sttIntegration.credentials);
+  } catch {
+    return { ok: false, errorMessage: 'Error de configuración del servicio de voz.' };
+  }
+
+  try {
+    const { buffer, mimeType } = await downloadMedia(audioId, channelAccessToken, config.META_API_VERSION);
+    const transcriber = getTranscriber(sttIntegration.provider);
+    const text = await transcriber.transcribe({ audioBuffer: buffer, mimeType, language: locale, apiKey: sttCreds.apiKey });
+    return { ok: true, text };
+  } catch (err) {
+    if (err instanceof SttCredentialError) {
+      return { ok: false, errorMessage: 'El servicio de voz no está disponible en este momento.' };
+    }
+    return { ok: false, errorMessage: 'No pude transcribir tu mensaje de voz. Por favor, escribe tu mensaje.' };
+  }
+}
+
+function resolveEmbedderKey(
+  integrations: BotIntegration[],
+  llmProvider: string,
+  llmApiKeyEnc: Buffer | null | undefined,
+): string | undefined {
+  // Prefer a dedicated embeddings integration
+  const embInt = integrations.find(i => i.kind === 'embeddings' && i.status === 'active');
+  if (embInt) {
+    try {
+      return decryptJson<{ apiKey: string }>(embInt.credentials).apiKey;
+    } catch { /* ignore */ }
+  }
+  // Fall back to OpenAI LLM key (compatible with text-embedding-3-small)
+  if (llmProvider === 'openai' && llmApiKeyEnc) {
+    try { return decrypt(llmApiKeyEnc); } catch { /* ignore */ }
+  }
+  return undefined;
 }
 
 function matchCommand(commands: BotCommand[], text: string): BotCommand | undefined {
@@ -215,17 +301,6 @@ async function getHistory(botId: string, endUserId: string, windowSize: number):
   }));
 }
 
-function getRelevantKnowledge(knowledge: BotKnowledge[], query: string): string {
-  if (!knowledge.length) return '';
-  const lowerQuery = query.toLowerCase();
-  const relevant = knowledge.filter(k => {
-    const text = `${k.title} ${k.content} ${k.tags.join(' ')}`.toLowerCase();
-    return lowerQuery.split(/\s+/).some(word => word.length > 3 && text.includes(word));
-  });
-  if (!relevant.length) return '';
-  return relevant.map(k => `[${k.title}]\n${k.content}`).join('\n\n');
-}
-
 function buildSystemPrompt(
   basePrompt: string,
   knowledge: string,
@@ -244,9 +319,10 @@ async function persistMessage(
   inputType: string,
   body: string,
   externalId?: string,
-): Promise<void> {
-  await db.message.create({
+): Promise<{ id: string }> {
+  return db.message.create({
     data: { botId, endUserId, direction, inputType, bodyEnc: encrypt(body), externalId: externalId ?? null },
+    select: { id: true },
   });
 }
 
@@ -294,17 +370,10 @@ async function handleLLMError(
   if (err instanceof LLMCredentialError) {
     await db.bot.update({ where: { id: botId }, data: { status: 'credential_error' } });
     invalidateBotCache(botId);
-    notifyCredentialError({
-      botId,
-      botName,
-      errorMessage: (err as Error).message,
-      detectedAt: new Date(),
-    });
+    notifyCredentialError({ botId, botName, errorMessage: (err as Error).message, detectedAt: new Date() });
     await channelProvider.sendText({ phoneId, accessToken: creds.accessToken, to, text: 'El servicio no está disponible en este momento. Inténtalo más tarde.', apiVersion: config.META_API_VERSION });
     return;
   }
-  if (err instanceof LLMRateLimitError) {
-    throw err; // BullMQ retries with backoff
-  }
+  if (err instanceof LLMRateLimitError) throw err;
   throw err;
 }

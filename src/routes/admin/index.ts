@@ -5,6 +5,9 @@ import channelRoutes from './channels';
 import orgRoutes from './organizations';
 import knowledgeRoutes from './knowledge';
 import userRoutes from './users';
+import feedbackRoutes from './feedback';
+import proactiveRoutes from './proactive';
+import integrationRoutes from './integrations';
 
 const adminRoutes: FastifyPluginAsync = async (fastify) => {
   // Phase A: simple API key auth via X-Admin-Key header or Bearer token
@@ -20,6 +23,9 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.register(channelRoutes, { prefix: '/bots' });
   fastify.register(knowledgeRoutes, { prefix: '/bots' });
   fastify.register(userRoutes, { prefix: '/bots' });
+  fastify.register(feedbackRoutes, { prefix: '/bots' });
+  fastify.register(proactiveRoutes, { prefix: '/bots' });
+  fastify.register(integrationRoutes, { prefix: '/bots' });
 };
 
 export default adminRoutes;

@@ -80,6 +80,7 @@ const mockBot = {
     { id: 'cc-1', botId: 'bot-uuid-1', country: 'MX', lines: CRISIS_LINES, enabled: true },
   ],
   knowledge: [],
+  integrations: [],
 };
 
 const mockChannel = {
