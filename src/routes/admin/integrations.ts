@@ -48,6 +48,8 @@ const integrationRoutes: FastifyPluginAsync = async (fastify) => {
   // Delete integration
   fastify.delete<{ Params: { botId: string; integrationId: string } }>('/:botId/integrations/:integrationId', async (req, reply) => {
     const { botId, integrationId } = req.params;
+    const existing = await db.botIntegration.findUnique({ where: { id: integrationId } });
+    if (!existing || existing.botId !== botId) return reply.status(404).send({ error: 'Integration not found' });
     await db.botIntegration.delete({ where: { id: integrationId } });
     invalidateBotCache(botId);
     return reply.status(204).send();

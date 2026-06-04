@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { db } from '../../db';
 import { invalidateBotCache } from '../../services/bot.service';
 import { generateEmbedding, encodeEmbedding } from '../../services/knowledge.service';
-import { decrypt } from '../../crypto';
+import { decrypt, decryptJson } from '../../crypto';
 
 const knowledgeRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { botId: string } }>('/:botId/knowledge', async (req, reply) => {
@@ -55,7 +55,7 @@ const knowledgeRoutes: FastifyPluginAsync = async (fastify) => {
     // Resolve the embedding API key
     let embedApiKey: string | undefined;
     if (bot.integrations.length > 0) {
-      const creds = JSON.parse(decrypt(bot.integrations[0].credentials)) as { apiKey: string };
+      const creds = decryptJson<{ apiKey: string }>(bot.integrations[0].credentials);
       embedApiKey = creds.apiKey;
     } else if (bot.llmProvider === 'openai' && bot.llmApiKeyEnc) {
       embedApiKey = decrypt(bot.llmApiKeyEnc);

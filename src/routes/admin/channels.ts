@@ -101,8 +101,14 @@ const channelRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(502).send({ error: 'No access_token in Meta response', detail: tokenData });
       }
       accessToken = tokenData.access_token;
-    } catch (err) {
+    } catch (_err) {
       return reply.status(502).send({ error: 'Failed to reach Meta API' });
+    }
+
+    // Guard: if this phoneId is already owned by a different bot, reject
+    const existing = await db.channel.findUnique({ where: { phoneId }, select: { botId: true } });
+    if (existing && existing.botId !== req.params.botId) {
+      return reply.status(409).send({ error: 'Phone number is already registered to another bot' });
     }
 
     const creds: MetaCloudCredentials = { accessToken };

@@ -47,6 +47,7 @@ Response format:
 
 export class SafetyClassifier {
   private llmClient?: Anthropic;
+  private llmClientKey?: string; // track which key the cached client was built with
 
   classify(text: string): ClassificationResult {
     for (const { pattern, category } of CRISIS_PATTERNS) {
@@ -72,8 +73,9 @@ export class SafetyClassifier {
   }
 
   private async classifyWithLLM(text: string, apiKey: string): Promise<ClassificationResult> {
-    if (!this.llmClient) {
+    if (!this.llmClient || this.llmClientKey !== apiKey) {
       this.llmClient = new Anthropic({ apiKey });
+      this.llmClientKey = apiKey;
     }
 
     const response = await this.llmClient.messages.create({
@@ -84,16 +86,18 @@ export class SafetyClassifier {
     });
 
     const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '{}';
-    const parsed = JSON.parse(raw) as { isCrisis: boolean; category?: string | null };
-    return {
-      isCrisis: Boolean(parsed.isCrisis),
-      category: parsed.category ?? undefined,
-    };
+    try {
+      const parsed = JSON.parse(raw) as { isCrisis: boolean; category?: string | null };
+      return { isCrisis: Boolean(parsed.isCrisis), category: parsed.category ?? undefined };
+    } catch {
+      return { isCrisis: false }; // fail open — malformed LLM JSON is not a crisis
+    }
   }
 
   // Reset the cached LLM client (e.g., when the platform key is rotated)
   resetClient(): void {
     this.llmClient = undefined;
+    this.llmClientKey = undefined;
   }
 }
 

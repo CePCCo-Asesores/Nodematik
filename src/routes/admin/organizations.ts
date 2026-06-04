@@ -98,6 +98,11 @@ const orgRoutes: FastifyPluginAsync = async (fastify) => {
     if (!req.user!.isSuperadmin && req.user!.role !== 'owner') {
       return reply.status(403).send({ error: 'Only owners can change roles' });
     }
+    // Verify the target user actually belongs to this org
+    const target = await db.orgUser.findUnique({ where: { id: req.params.userId }, select: { orgId: true } });
+    if (!target || target.orgId !== req.params.id) {
+      return reply.status(404).send({ error: 'Member not found in this organization' });
+    }
     const user = await db.orgUser.update({
       where: { id: req.params.userId },
       data: { role: req.body.role },
@@ -113,6 +118,11 @@ const orgRoutes: FastifyPluginAsync = async (fastify) => {
     }
     if (!req.user!.isSuperadmin && req.user!.role !== 'owner' && req.user!.role !== 'admin') {
       return reply.status(403).send({ error: 'Only owners and admins can remove members' });
+    }
+    // Verify the target user actually belongs to this org
+    const target = await db.orgUser.findUnique({ where: { id: req.params.userId }, select: { orgId: true } });
+    if (!target || target.orgId !== req.params.id) {
+      return reply.status(404).send({ error: 'Member not found in this organization' });
     }
     await db.orgUser.delete({ where: { id: req.params.userId } });
     return reply.status(204).send();

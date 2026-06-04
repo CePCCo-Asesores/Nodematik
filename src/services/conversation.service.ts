@@ -8,7 +8,7 @@ import { safetyClassifier } from './safety.service';
 import { notifyCredentialError } from './notification.service';
 import * as consentService from './consent.service';
 import { getRelevantKnowledge } from './knowledge.service';
-import { checkQuota, incrementUsage } from './quota.service';
+import { tryIncrementQuota } from './quota.service';
 import { downloadMedia } from './media.service';
 import { getLLMProvider, LLMCredentialError, LLMRateLimitError } from '../providers/llm';
 import { getChannelProvider } from '../providers/channel';
@@ -97,17 +97,17 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
     return;
   }
 
-  // ── Step 7: History + knowledge ──────────────────────────────────────────
-  const history = await getHistory(bot.id, endUser.id, bot.historyWindow);
-  const embedderKey = resolveEmbedderKey(bot.integrations, bot.llmProvider ?? '', bot.llmApiKeyEnc);
-  const knowledge = await getRelevantKnowledge(bot.knowledge, inputText, embedderKey);
-
-  // ── Quota gate (before any LLM call) ────────────────────────────────────
-  const withinQuota = await checkQuota(bot.orgId).catch(() => true); // fail open
+  // ── Quota gate — atomic check+increment before any external API call ────
+  const withinQuota = await tryIncrementQuota(bot.orgId).catch(() => true); // fail open
   if (!withinQuota) {
     await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: 'El servicio ha alcanzado su límite mensual de mensajes. Contacta al administrador.', apiVersion: config.META_API_VERSION });
     return;
   }
+
+  // ── Step 7: History + knowledge ──────────────────────────────────────────
+  const history = await getHistory(bot.id, endUser.id, bot.historyWindow);
+  const embedderKey = resolveEmbedderKey(bot.integrations, bot.llmProvider ?? '', bot.llmApiKeyEnc);
+  const knowledge = await getRelevantKnowledge(bot.knowledge, inputText, embedderKey);
 
   // ── Step 8: LLM (client's provider + client's key) ───────────────────────
   if (!bot.llmProvider || !bot.llmModel || !bot.llmApiKeyEnc) {
@@ -147,9 +147,6 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   // ── Step 10: Persist + send ───────────────────────────────────────────────
   const outMsg = await persistMessage(bot.id, endUser.id, 'out', 'text', responseText);
   await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: responseText, apiVersion: config.META_API_VERSION });
-
-  // Track usage after a successful LLM response
-  incrementUsage(bot.orgId).catch(() => {}); // non-critical
 
   // ── Optional feedback collection ─────────────────────────────────────────
   const identity = bot.identity as Record<string, unknown> | null;

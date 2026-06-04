@@ -17,13 +17,15 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     const existing = await db.orgUser.findFirst({ where: { email } });
     if (existing) return reply.status(409).send({ error: 'Email already registered' });
 
-    const [org, passwordHash] = await Promise.all([
-      db.organization.create({ data: { name: orgName } }),
-      hashPassword(password),
-    ]);
+    const passwordHash = await hashPassword(password);
 
-    const user = await db.orgUser.create({
-      data: { orgId: org.id, email, passwordHash, role: 'owner' },
+    // Wrap org + user creation in a transaction — partial failure leaves no orphaned org
+    const { org, user } = await db.$transaction(async (tx) => {
+      const org = await tx.organization.create({ data: { name: orgName } });
+      const user = await tx.orgUser.create({
+        data: { orgId: org.id, email, passwordHash, role: 'owner' },
+      });
+      return { org, user };
     });
 
     const token = signToken({ sub: user.id, orgId: org.id, role: 'owner' });

@@ -96,11 +96,11 @@ describe('SafetyClassifier — async with LLM classifier', () => {
     const mockCreate = vi.fn().mockResolvedValue({
       content: [{ type: 'text', text: '{"isCrisis":true,"category":"suicide_risk"}' }],
     });
-    // Inject mock into the private client via classifyAsync path
-    // We mock the Anthropic constructor via vi.mock at module level
-    (classifier as unknown as { llmClient: { messages: { create: typeof mockCreate } } }).llmClient = {
-      messages: { create: mockCreate },
-    };
+    // Inject mock into the private client — also set llmClientKey so the key-rotation guard
+    // doesn't replace the injected mock with a real Anthropic instance
+    type ClassifierPrivate = { llmClient: { messages: { create: typeof mockCreate } }; llmClientKey: string };
+    (classifier as unknown as ClassifierPrivate).llmClient = { messages: { create: mockCreate } };
+    (classifier as unknown as ClassifierPrivate).llmClientKey = 'fake-platform-key';
 
     const result = await classifier.classifyAsync('text that passes keyword rules but is ambiguous');
     expect(result.isCrisis).toBe(true);
@@ -114,9 +114,9 @@ describe('SafetyClassifier — async with LLM classifier', () => {
     process.env.SAFETY_PROVIDER_API_KEY = 'fake-platform-key';
 
     const classifier = new SafetyClassifier();
-    (classifier as unknown as { llmClient: { messages: { create: () => never } } }).llmClient = {
-      messages: { create: () => { throw new Error('network error'); } },
-    };
+    type ClassifierPrivate = { llmClient: { messages: { create: () => never } }; llmClientKey: string };
+    (classifier as unknown as ClassifierPrivate).llmClient = { messages: { create: () => { throw new Error('network error'); } } };
+    (classifier as unknown as ClassifierPrivate).llmClientKey = 'fake-platform-key';
 
     const result = await classifier.classifyAsync('ordinary message');
     expect(result.isCrisis).toBe(false); // keyword result, not an error

@@ -1,39 +1,45 @@
 import { db } from '../db';
 
-const PLAN_QUOTAS: Record<string, number> = {
-  free: 1_000,
-  pro: 10_000,
-  enterprise: 0, // 0 = unlimited
-};
-
 function isSamePeriod(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
 }
 
-export async function checkQuota(orgId: string): Promise<boolean> {
+/**
+ * Atomically checks quota and increments usage in one database operation.
+ * Returns true if the message is within quota (and usage was incremented),
+ * false if the quota is exceeded (usage is NOT incremented).
+ *
+ * msg_quota = 0 means unlimited.
+ * Concurrent workers are handled safely via a conditional SQL UPDATE.
+ */
+export async function tryIncrementQuota(orgId: string): Promise<boolean> {
   const org = await db.organization.findUnique({
     where: { id: orgId },
-    select: { plan: true, msgQuota: true, msgUsed: true, currentPeriodStart: true },
+    select: { msgQuota: true, msgUsed: true, currentPeriodStart: true },
   });
-  if (!org) return true;
+  if (!org) return true; // fail open — unknown org does not block conversations
 
   const now = new Date();
+
+  // Period rolled over — reset counter and count this message as the first
   if (!isSamePeriod(now, org.currentPeriodStart)) {
     await db.organization.update({
       where: { id: orgId },
-      data: { msgUsed: 0, currentPeriodStart: now },
+      data: { msgUsed: 1, currentPeriodStart: now },
     });
     return true;
   }
 
-  const limit = org.msgQuota > 0 ? org.msgQuota : (PLAN_QUOTAS[org.plan] ?? PLAN_QUOTAS.free);
-  if (limit === 0) return true; // enterprise unlimited
-  return org.msgUsed < limit;
-}
+  // Unlimited org — just increment
+  if (org.msgQuota === 0) {
+    await db.organization.update({ where: { id: orgId }, data: { msgUsed: { increment: 1 } } });
+    return true;
+  }
 
-export async function incrementUsage(orgId: string): Promise<void> {
-  await db.organization.update({
-    where: { id: orgId },
-    data: { msgUsed: { increment: 1 } },
-  });
+  // Atomic conditional increment: succeeds only when msg_used < msg_quota
+  const affected: number = await db.$executeRaw`
+    UPDATE organizations SET msg_used = msg_used + 1
+    WHERE id = ${orgId} AND msg_used < msg_quota
+  `;
+  return affected > 0;
 }

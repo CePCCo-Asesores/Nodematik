@@ -55,10 +55,11 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(events);
   });
 
-  // Bots currently in credential_error state (notification panel)
-  fastify.get('/credential-errors', async (_req, reply) => {
+  // Bots currently in credential_error state (notification panel) — scoped to org
+  fastify.get('/credential-errors', async (req, reply) => {
+    const orgFilter = req.user!.isSuperadmin ? {} : { orgId: req.user!.orgId };
     const bots = await db.bot.findMany({
-      where: { status: 'credential_error' },
+      where: { status: 'credential_error', ...orgFilter },
       select: { id: true, name: true, orgId: true, status: true, updatedAt: true, llmProvider: true, llmModel: true },
       orderBy: { updatedAt: 'desc' },
     });
