@@ -1,18 +1,12 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { db } from '../db';
 import { hashPassword, verifyPassword, signToken } from '../services/auth.service';
-
-interface RegisterBody { email: string; password: string; orgName: string }
-interface LoginBody { email: string; password: string }
-interface InviteBody { email: string; password: string; role?: string }
+import { parseBody, RegisterSchema, LoginSchema } from '../lib/validate';
 
 const authRoutes: FastifyPluginAsync = async (fastify) => {
   // Create org + owner account
-  fastify.post<{ Body: RegisterBody }>('/register', async (req, reply) => {
-    const { email, password, orgName } = req.body ?? {};
-    if (!email || !password || !orgName) {
-      return reply.status(400).send({ error: 'email, password, and orgName are required' });
-    }
+  fastify.post('/register', async (req, reply) => {
+    const { email, password, orgName } = parseBody(RegisterSchema, req.body);
 
     const existing = await db.orgUser.findFirst({ where: { email } });
     if (existing) return reply.status(409).send({ error: 'Email already registered' });
@@ -33,11 +27,8 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Login
-  fastify.post<{ Body: LoginBody }>('/login', async (req, reply) => {
-    const { email, password } = req.body ?? {};
-    if (!email || !password) {
-      return reply.status(400).send({ error: 'email and password are required' });
-    }
+  fastify.post('/login', async (req, reply) => {
+    const { email, password } = parseBody(LoginSchema, req.body);
 
     const user = await db.orgUser.findFirst({ where: { email } });
     if (!user) return reply.status(401).send({ error: 'Invalid credentials' });

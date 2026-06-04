@@ -3,6 +3,11 @@ import { Prisma } from '@prisma/client';
 import { db } from '../../db';
 import { encrypt } from '../../crypto';
 import { invalidateBotCache } from '../../services/bot.service';
+import {
+  parseBody,
+  CreateBotSchema, UpdateBotSchema, PromptSchema,
+  BrandingSchema, CommandSchema, CrisisConfigSchema,
+} from '../../lib/validate';
 
 const botRoutes: FastifyPluginAsync = async (fastify) => {
   // Org isolation for /:id sub-routes (params.id, not params.botId caught by parent)
@@ -38,8 +43,8 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Create bot — orgId defaults to caller's org
-  fastify.post<{ Body: CreateBotBody }>('/', async (req, reply) => {
-    const body = req.body;
+  fastify.post('/', async (req, reply) => {
+    const body = parseBody(CreateBotSchema, req.body);
     const orgId = req.user!.isSuperadmin ? (body.orgId ?? req.user!.orgId) : req.user!.orgId;
 
     const bot = await db.bot.create({
@@ -67,9 +72,9 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Update bot
-  fastify.put<{ Params: { id: string }; Body: UpdateBotBody }>('/:id', async (req, reply) => {
+  fastify.put<{ Params: { id: string } }>('/:id', async (req, reply) => {
     const { id } = req.params;
-    const body = req.body;
+    const body = parseBody(UpdateBotSchema, req.body);
 
     const existing = await db.bot.findUnique({ where: { id } });
     if (!existing) return reply.status(404).send({ error: 'Bot not found' });
@@ -104,9 +109,9 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Update system_prompt (creates a new version)
-  fastify.post<{ Params: { id: string }; Body: { systemPrompt: string } }>('/:id/prompt', async (req, reply) => {
+  fastify.post<{ Params: { id: string } }>('/:id/prompt', async (req, reply) => {
     const { id } = req.params;
-    const { systemPrompt } = req.body;
+    const { systemPrompt } = parseBody(PromptSchema, req.body);
     const createdBy = req.user!.userId;
 
     const latest = await db.botPromptVersion.findFirst({ where: { botId: id }, orderBy: { version: 'desc' } });
@@ -156,11 +161,12 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(branding);
   });
 
-  fastify.put<{ Params: { id: string }; Body: BrandingBody }>('/:id/branding', async (req, reply) => {
+  fastify.put<{ Params: { id: string } }>('/:id/branding', async (req, reply) => {
+    const body = parseBody(BrandingSchema, req.body);
     const branding = await db.botBranding.upsert({
       where: { botId: req.params.id },
-      update: req.body,
-      create: { botId: req.params.id, ...req.body },
+      update: body,
+      create: { botId: req.params.id, ...body },
     });
     invalidateBotCache(req.params.id);
     return reply.send(branding);
@@ -172,14 +178,17 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(await db.botCommand.findMany({ where: { botId: req.params.id } }));
   });
 
-  fastify.post<{ Params: { id: string }; Body: CommandBody }>('/:id/commands', async (req, reply) => {
-    const cmd = await db.botCommand.create({ data: { botId: req.params.id, ...req.body, payload: req.body.payload as Prisma.InputJsonValue } });
+  fastify.post<{ Params: { id: string } }>('/:id/commands', async (req, reply) => {
+    const body = parseBody(CommandSchema, req.body);
+    const cmd = await db.botCommand.create({
+      data: { botId: req.params.id, ...body, payload: body.payload as Prisma.InputJsonValue },
+    });
     invalidateBotCache(req.params.id);
     return reply.status(201).send(cmd);
   });
 
-  fastify.put<{ Params: { id: string; cmdId: string }; Body: Partial<CommandBody> }>('/:id/commands/:cmdId', async (req, reply) => {
-    const body = req.body;
+  fastify.put<{ Params: { id: string; cmdId: string } }>('/:id/commands/:cmdId', async (req, reply) => {
+    const body = parseBody(CommandSchema.partial(), req.body);
     const updateData: Prisma.BotCommandUpdateInput = {};
     if (body.trigger !== undefined) updateData.trigger = body.trigger;
     if (body.responseType !== undefined) updateData.responseType = body.responseType;
@@ -201,11 +210,12 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(await db.botCrisisConfig.findMany({ where: { botId: req.params.id } }));
   });
 
-  fastify.put<{ Params: { id: string }; Body: CrisisConfigBody }>('/:id/crisis-config', async (req, reply) => {
+  fastify.put<{ Params: { id: string } }>('/:id/crisis-config', async (req, reply) => {
+    const { configs } = parseBody(CrisisConfigSchema, req.body);
     // Replace all crisis config for this bot
     await db.botCrisisConfig.deleteMany({ where: { botId: req.params.id } });
     const created = await db.botCrisisConfig.createMany({
-      data: req.body.configs.map(c => ({ botId: req.params.id, ...c })),
+      data: configs.map(c => ({ botId: req.params.id, ...c })),
     });
     invalidateBotCache(req.params.id);
     return reply.send({ count: created.count });
@@ -217,60 +227,6 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
 function sanitizeBot(bot: Record<string, unknown>): Record<string, unknown> {
   const { llmApiKeyEnc, ...rest } = bot as Record<string, unknown> & { llmApiKeyEnc?: unknown };
   return { ...rest, llmApiKeySet: llmApiKeyEnc != null };
-}
-
-// ─── Body types ──────────────────────────────────────────────────────────────
-
-interface CreateBotBody {
-  orgId?: string; // ignored for non-superadmin (uses JWT orgId)
-  name: string;
-  locale?: string;
-  systemPrompt?: string;
-  identity?: Record<string, unknown>;
-  onboardingMsg?: string;
-  historyWindow?: number;
-  llmProvider?: string;
-  llmModel?: string;
-  llmApiKey?: string;
-  llmParams?: Record<string, unknown>;
-  branding?: BrandingBody;
-}
-
-interface UpdateBotBody {
-  name?: string;
-  locale?: string;
-  status?: string;
-  identity?: Record<string, unknown>;
-  onboardingMsg?: string;
-  historyWindow?: number;
-  llmProvider?: string;
-  llmModel?: string;
-  llmApiKey?: string;
-  llmParams?: Record<string, unknown>;
-}
-
-interface BrandingBody {
-  companyName?: string;
-  logoUrl?: string;
-  primaryColor?: string;
-  website?: string;
-  supportContact?: string;
-  privacyPolicyUrl?: string;
-  termsUrl?: string;
-}
-
-interface CommandBody {
-  trigger: string;
-  responseType: string;
-  payload: Record<string, unknown>;
-}
-
-interface CrisisConfigBody {
-  configs: Array<{
-    country: string;
-    lines: Array<{ name: string; phone: string; hours?: string }>;
-    enabled?: boolean;
-  }>;
 }
 
 export default botRoutes;

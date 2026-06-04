@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { db } from '../../db';
 import { deleteEndUserData } from '../../services/consent.service';
+import { parseBody, PatchUserSchema } from '../../lib/validate';
 
 const userRoutes: FastifyPluginAsync = async (fastify) => {
   // List end users for a bot (hashed IDs only — no PII exposed)
@@ -30,15 +31,16 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Suspend / unsuspend an end user
-  fastify.patch<{ Params: { botId: string; userId: string }; Body: { paused: boolean } }>('/:botId/users/:userId', async (req, reply) => {
+  fastify.patch<{ Params: { botId: string; userId: string } }>('/:botId/users/:userId', async (req, reply) => {
     const { botId, userId } = req.params;
+    const { paused } = parseBody(PatchUserSchema, req.body);
 
     const user = await db.endUser.findUnique({ where: { id: userId } });
     if (!user || user.botId !== botId) {
       return reply.status(404).send({ error: 'End user not found' });
     }
 
-    const updated = await db.endUser.update({ where: { id: userId }, data: { paused: req.body.paused } });
+    const updated = await db.endUser.update({ where: { id: userId }, data: { paused } });
     return reply.send({ id: updated.id, paused: updated.paused });
   });
 

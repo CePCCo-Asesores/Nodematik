@@ -1,6 +1,7 @@
 import { Worker } from 'bullmq';
-import { redisConnection, MESSAGE_QUEUE } from './queue';
+import { redisConnection, MESSAGE_QUEUE, dlq } from './queue';
 import { processInboundMessage } from '../services/conversation.service';
+import { logger } from '../logger';
 import type { InboundMessageJob } from '../types';
 
 export function startWorker(): Worker {
@@ -16,16 +17,25 @@ export function startWorker(): Worker {
   );
 
   worker.on('failed', (job, err) => {
-    console.error('[worker] job failed', {
-      jobId: job?.id,
-      phoneId: job?.data?.phoneId,
-      attempt: job?.attemptsMade,
-      error: err?.message,
-    });
+    const maxAttempts = job?.opts.attempts ?? 3;
+    const exhausted = (job?.attemptsMade ?? 0) >= maxAttempts;
+
+    logger.error(
+      { jobId: job?.id, phoneId: job?.data?.phoneId, attempt: job?.attemptsMade, exhausted, err: err?.message },
+      'job failed',
+    );
+
+    // Move to DLQ once all retries are exhausted so the payload is preserved
+    // for manual inspection and replay without blocking the main queue.
+    if (exhausted && job) {
+      dlq.add('failed-message', job.data, { jobId: `dlq-${job.id}` }).catch((dlqErr: Error) => {
+        logger.error({ err: dlqErr.message }, 'failed to enqueue to DLQ');
+      });
+    }
   });
 
   worker.on('error', (err) => {
-    console.error('[worker] worker error', err.message);
+    logger.error({ err: err.message }, 'worker error');
   });
 
   return worker;

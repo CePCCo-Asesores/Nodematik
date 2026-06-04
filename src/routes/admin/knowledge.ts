@@ -1,9 +1,9 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { Prisma } from '@prisma/client';
 import { db } from '../../db';
 import { invalidateBotCache } from '../../services/bot.service';
 import { generateEmbedding, encodeEmbedding } from '../../services/knowledge.service';
 import { decrypt, decryptJson } from '../../crypto';
+import { parseBody, KnowledgeSchema, UpdateKnowledgeSchema } from '../../lib/validate';
 
 const knowledgeRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { botId: string } }>('/:botId/knowledge', async (req, reply) => {
@@ -14,25 +14,27 @@ const knowledgeRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(items);
   });
 
-  fastify.post<{ Params: { botId: string }; Body: KnowledgeBody }>('/:botId/knowledge', async (req, reply) => {
+  fastify.post<{ Params: { botId: string } }>('/:botId/knowledge', async (req, reply) => {
+    const { title, content, tags } = parseBody(KnowledgeSchema, req.body);
     const item = await db.botKnowledge.create({
-      data: { botId: req.params.botId, title: req.body.title, content: req.body.content, tags: req.body.tags ?? [] },
+      data: { botId: req.params.botId, title, content, tags: tags ?? [] },
     });
     invalidateBotCache(req.params.botId);
     return reply.status(201).send(item);
   });
 
-  fastify.put<{ Params: { botId: string; itemId: string }; Body: Partial<KnowledgeBody> }>('/:botId/knowledge/:itemId', async (req, reply) => {
-    const updateData: Prisma.BotKnowledgeUpdateInput = {};
-    if (req.body.title !== undefined) updateData.title = req.body.title;
-    if (req.body.content !== undefined) updateData.content = req.body.content;
-    if (req.body.tags !== undefined) updateData.tags = req.body.tags;
-    // Clear embedding when content changes — it becomes stale
-    if (req.body.content !== undefined) {
-      updateData.embeddingData = null;
-      updateData.hasEmbedding = false;
+  fastify.put<{ Params: { botId: string; itemId: string } }>('/:botId/knowledge/:itemId', async (req, reply) => {
+    const body = parseBody(UpdateKnowledgeSchema, req.body);
+    const data: Record<string, unknown> = {};
+    if (body.title !== undefined) data.title = body.title;
+    if (body.content !== undefined) {
+      data.content = body.content;
+      // Clear embedding when content changes — it becomes stale
+      data.embeddingData = null;
+      data.hasEmbedding = false;
     }
-    const item = await db.botKnowledge.update({ where: { id: req.params.itemId }, data: updateData });
+    if (body.tags !== undefined) data.tags = body.tags;
+    const item = await db.botKnowledge.update({ where: { id: req.params.itemId }, data });
     invalidateBotCache(req.params.botId);
     return reply.send(item);
   });
@@ -84,11 +86,5 @@ const knowledgeRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send({ updated, failed, total: bot.knowledge.length });
   });
 };
-
-interface KnowledgeBody {
-  title: string;
-  content: string;
-  tags?: string[];
-}
 
 export default knowledgeRoutes;

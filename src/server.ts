@@ -10,7 +10,10 @@ app.listen({ port: config.PORT, host: '0.0.0.0' }, (err) => {
   }
 });
 
-process.on('SIGTERM', async () => {
+async function shutdown() {
   await app.close();
   process.exit(0);
-});
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

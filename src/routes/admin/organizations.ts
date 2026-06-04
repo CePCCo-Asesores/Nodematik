@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { db } from '../../db';
 import { hashPassword } from '../../services/auth.service';
+import { parseBody, CreateOrgSchema, UpdateOrgSchema, InviteMemberSchema, UpdateMemberRoleSchema } from '../../lib/validate';
 
 const orgRoutes: FastifyPluginAsync = async (fastify) => {
   // List orgs — superadmin sees all, org users see only their own
@@ -13,9 +14,9 @@ const orgRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Create org — superadmin only (regular users create via POST /auth/register)
-  fastify.post<{ Body: { name: string; plan?: string; msgQuota?: number } }>('/', async (req, reply) => {
+  fastify.post('/', async (req, reply) => {
     if (!req.user!.isSuperadmin) return reply.status(403).send({ error: 'Forbidden' });
-    const { name, plan, msgQuota } = req.body;
+    const { name, plan, msgQuota } = parseBody(CreateOrgSchema, req.body);
     const org = await db.organization.create({ data: { name, plan: plan ?? 'free', msgQuota: msgQuota ?? 1000 } });
     return reply.status(201).send(org);
   });
@@ -34,11 +35,11 @@ const orgRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Update org
-  fastify.put<{ Params: { id: string }; Body: { name?: string; plan?: string; msgQuota?: number } }>('/:id', async (req, reply) => {
+  fastify.put<{ Params: { id: string } }>('/:id', async (req, reply) => {
     if (!req.user!.isSuperadmin && req.user!.orgId !== req.params.id) {
       return reply.status(403).send({ error: 'Forbidden' });
     }
-    const { name, plan, msgQuota } = req.body;
+    const { name, plan, msgQuota } = parseBody(UpdateOrgSchema, req.body);
     const data: Record<string, unknown> = {};
     if (name !== undefined) data.name = name;
     // Only superadmin can change plan/quota
@@ -71,14 +72,14 @@ const orgRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Invite member to org
-  fastify.post<{ Params: { id: string }; Body: { email: string; password: string; role?: string } }>('/:id/members', async (req, reply) => {
+  fastify.post<{ Params: { id: string } }>('/:id/members', async (req, reply) => {
     if (!req.user!.isSuperadmin && req.user!.orgId !== req.params.id) {
       return reply.status(403).send({ error: 'Forbidden' });
     }
     if (!req.user!.isSuperadmin && req.user!.role !== 'owner' && req.user!.role !== 'admin') {
       return reply.status(403).send({ error: 'Only owners and admins can invite members' });
     }
-    const { email, password, role } = req.body;
+    const { email, password, role } = parseBody(InviteMemberSchema, req.body);
     const existing = await db.orgUser.findFirst({ where: { email } });
     if (existing) return reply.status(409).send({ error: 'Email already registered' });
 
@@ -91,13 +92,14 @@ const orgRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Change member role
-  fastify.put<{ Params: { id: string; userId: string }; Body: { role: string } }>('/:id/members/:userId', async (req, reply) => {
+  fastify.put<{ Params: { id: string; userId: string } }>('/:id/members/:userId', async (req, reply) => {
     if (!req.user!.isSuperadmin && req.user!.orgId !== req.params.id) {
       return reply.status(403).send({ error: 'Forbidden' });
     }
     if (!req.user!.isSuperadmin && req.user!.role !== 'owner') {
       return reply.status(403).send({ error: 'Only owners can change roles' });
     }
+    const { role } = parseBody(UpdateMemberRoleSchema, req.body);
     // Verify the target user actually belongs to this org
     const target = await db.orgUser.findUnique({ where: { id: req.params.userId }, select: { orgId: true } });
     if (!target || target.orgId !== req.params.id) {
@@ -105,7 +107,7 @@ const orgRoutes: FastifyPluginAsync = async (fastify) => {
     }
     const user = await db.orgUser.update({
       where: { id: req.params.userId },
-      data: { role: req.body.role },
+      data: { role },
       select: { id: true, email: true, role: true },
     });
     return reply.send(user);

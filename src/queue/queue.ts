@@ -27,6 +27,7 @@ export function parseRedisConnection(url: string): {
 export const redisConnection = parseRedisConnection(config.REDIS_URL);
 
 export const MESSAGE_QUEUE = 'inbound-messages';
+export const DLQ_QUEUE = 'inbound-messages-dlq';
 
 export const messageQueue = new Queue(MESSAGE_QUEUE, {
   connection: redisConnection,
@@ -35,5 +36,15 @@ export const messageQueue = new Queue(MESSAGE_QUEUE, {
     backoff: { type: 'exponential', delay: 2000 },
     removeOnComplete: { count: 2000 },
     removeOnFail: { count: 5000 },
+  },
+});
+
+// Dead-letter queue — receives jobs that exhausted all retries.
+// Jobs are kept indefinitely for manual inspection and replay.
+export const dlq = new Queue(DLQ_QUEUE, {
+  connection: redisConnection,
+  defaultJobOptions: {
+    removeOnComplete: false,
+    removeOnFail: false,
   },
 });

@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { db } from '../../db';
 import { encryptJson, decryptJson } from '../../crypto';
 import { invalidateBotCache } from '../../services/bot.service';
+import { parseBody, CreateIntegrationSchema, UpdateIntegrationSchema } from '../../lib/validate';
 
 const integrationRoutes: FastifyPluginAsync = async (fastify) => {
   // List integrations for a bot (credentials redacted)
@@ -11,33 +12,29 @@ const integrationRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Add integration
-  fastify.post<{ Params: { botId: string }; Body: CreateIntegrationBody }>('/:botId/integrations', async (req, reply) => {
+  fastify.post<{ Params: { botId: string } }>('/:botId/integrations', async (req, reply) => {
     const { botId } = req.params;
-    const { kind, provider, apiKey, ...extra } = req.body;
+    const { kind, provider, apiKey, ...extra } = parseBody(CreateIntegrationSchema, req.body);
     const integration = await db.botIntegration.create({
-      data: {
-        botId,
-        kind,
-        provider,
-        credentials: encryptJson({ apiKey, ...extra }),
-        status: 'active',
-      },
+      data: { botId, kind, provider, credentials: encryptJson({ apiKey, ...extra }), status: 'active' },
     });
     invalidateBotCache(botId);
     return reply.status(201).send(sanitize(integration));
   });
 
   // Update integration (e.g. rotate key)
-  fastify.put<{ Params: { botId: string; integrationId: string }; Body: UpdateIntegrationBody }>('/:botId/integrations/:integrationId', async (req, reply) => {
+  fastify.put<{ Params: { botId: string; integrationId: string } }>('/:botId/integrations/:integrationId', async (req, reply) => {
     const { botId, integrationId } = req.params;
+    const body = parseBody(UpdateIntegrationSchema, req.body);
+
     const existing = await db.botIntegration.findUnique({ where: { id: integrationId } });
     if (!existing || existing.botId !== botId) return reply.status(404).send({ error: 'Integration not found' });
 
     const data: Record<string, unknown> = {};
-    if (req.body.status !== undefined) data.status = req.body.status;
-    if (req.body.apiKey !== undefined) {
+    if (body.status !== undefined) data.status = body.status;
+    if (body.apiKey !== undefined) {
       const existingCreds = decryptJson<Record<string, unknown>>(existing.credentials);
-      data.credentials = encryptJson({ ...existingCreds, apiKey: req.body.apiKey });
+      data.credentials = encryptJson({ ...existingCreds, apiKey: body.apiKey });
     }
 
     const updated = await db.botIntegration.update({ where: { id: integrationId }, data });
@@ -60,18 +57,6 @@ function sanitize(i: Record<string, unknown>) {
   const { credentials, ...rest } = i;
   void credentials;
   return rest;
-}
-
-interface CreateIntegrationBody {
-  kind: string;     // 'stt' | 'embeddings' | ...
-  provider: string; // 'openai_whisper' | 'openai' | ...
-  apiKey: string;
-  [extra: string]: unknown;
-}
-
-interface UpdateIntegrationBody {
-  status?: string;
-  apiKey?: string;
 }
 
 export default integrationRoutes;

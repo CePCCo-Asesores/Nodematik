@@ -3,6 +3,7 @@ import { db } from '../../db';
 import { encryptJson, decryptJson } from '../../crypto';
 import { invalidateBotCache } from '../../services/bot.service';
 import { config } from '../../config';
+import { parseBody, CreateChannelSchema, UpdateChannelSchema, EmbeddedSignupSchema } from '../../lib/validate';
 import type { MetaCloudCredentials } from '../../types';
 
 const channelRoutes: FastifyPluginAsync = async (fastify) => {
@@ -13,20 +14,13 @@ const channelRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Add channel to a bot
-  fastify.post<{ Params: { botId: string }; Body: CreateChannelBody }>('/:botId/channels', async (req, reply) => {
+  fastify.post<{ Params: { botId: string } }>('/:botId/channels', async (req, reply) => {
     const { botId } = req.params;
-    const { provider, phoneId, accessToken, businessAccountId, verifyToken } = req.body;
+    const { provider, phoneId, accessToken, businessAccountId, verifyToken } = parseBody(CreateChannelSchema, req.body);
 
     const creds: MetaCloudCredentials = { accessToken, businessAccountId };
     const channel = await db.channel.create({
-      data: {
-        botId,
-        provider,
-        phoneId,
-        credentials: encryptJson(creds),
-        verifyToken,
-        status: 'connected',
-      },
+      data: { botId, provider, phoneId, credentials: encryptJson(creds), verifyToken, status: 'connected' },
     });
 
     invalidateBotCache(botId);
@@ -34,9 +28,9 @@ const channelRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Update channel (rotate token, change status)
-  fastify.put<{ Params: { botId: string; channelId: string }; Body: UpdateChannelBody }>('/:botId/channels/:channelId', async (req, reply) => {
+  fastify.put<{ Params: { botId: string; channelId: string } }>('/:botId/channels/:channelId', async (req, reply) => {
     const { botId, channelId } = req.params;
-    const body = req.body;
+    const body = parseBody(UpdateChannelSchema, req.body);
 
     const existing = await db.channel.findUnique({ where: { id: channelId } });
     if (!existing) return reply.status(404).send({ error: 'Channel not found' });
@@ -68,15 +62,12 @@ const channelRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // ── Meta Embedded Signup ─────────────────────────────────────────────────
-  fastify.post<{ Params: { botId: string }; Body: EmbeddedSignupBody }>('/:botId/channels/embedded-signup', async (req, reply) => {
+  fastify.post<{ Params: { botId: string } }>('/:botId/channels/embedded-signup', async (req, reply) => {
     if (!config.META_APP_ID) {
       return reply.status(501).send({ error: 'META_APP_ID not configured — Embedded Signup is unavailable' });
     }
 
-    const { code, phoneId, verifyToken, redirectUri } = req.body;
-    if (!code || !phoneId || !verifyToken) {
-      return reply.status(400).send({ error: 'code, phoneId, and verifyToken are required' });
-    }
+    const { code, phoneId, verifyToken, redirectUri } = parseBody(EmbeddedSignupSchema, req.body);
 
     // Exchange Meta auth code for an access token
     const params = new URLSearchParams({
@@ -127,28 +118,6 @@ function sanitizeChannel(channel: Record<string, unknown>): Record<string, unkno
   const { credentials, ...rest } = channel;
   void credentials;
   return rest;
-}
-
-interface CreateChannelBody {
-  provider: string;
-  phoneId: string;
-  accessToken: string;
-  businessAccountId?: string;
-  verifyToken: string;
-}
-
-interface UpdateChannelBody {
-  status?: string;
-  verifyToken?: string;
-  accessToken?: string;
-  businessAccountId?: string;
-}
-
-interface EmbeddedSignupBody {
-  code: string;
-  phoneId: string;
-  verifyToken: string;
-  redirectUri?: string;
 }
 
 export default channelRoutes;

@@ -1,0 +1,14 @@
+node_modules
+dist
+.env
+*.env
+.env.*
+.env.local
+.git
+.gitignore
+coverage
+*.log
+.DS_Store
+prisma/generated
+docker-compose.yml
+README.md
