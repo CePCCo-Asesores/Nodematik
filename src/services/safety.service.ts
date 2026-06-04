@@ -1,32 +1,99 @@
+import Anthropic from '@anthropic-ai/sdk';
 import type { ClassificationResult } from '../types';
 
 // Platform-controlled safety classifier — deliberately independent of whatever
 // LLM a client chose for their bot. A weak or uncensored client model cannot
-// degrade the safety layer.
+// degrade this layer.
+//
+// Two-tier strategy:
+//   1. Fast synchronous keyword scan (always runs, no network call)
+//   2. Async LLM-based contextual classification using the PLATFORM key
+//      (SAFETY_PROVIDER_API_KEY) — not the client's key. Runs only when the
+//      keyword scan returns no result AND the key is configured.
+//
+// Fallback policy: if the LLM classifier errors, fall back to the keyword
+// result rather than blocking all normal conversations.
 
-// Crisis keyword patterns (Spanish + English, Mexico defaults)
 const CRISIS_PATTERNS: Array<{ pattern: RegExp; category: string }> = [
-  { pattern: /\b(suicid[oaie]|suicidarme|suicidarle|suicidarlos?)\b/i, category: 'suicide_risk' },
+  // ── Spanish: suicidal ideation ─────────────────────────────────────────────
+  { pattern: /\bsuicid[aeiou]/i, category: 'suicide_risk' },
   { pattern: /\bmatarme\b|\bme\s+quiero\s+matar\b|\bme\s+voy\s+a\s+matar\b/i, category: 'suicide_risk' },
-  { pattern: /\bquiero\s+(morir|morirme)\b|\bdeseo\s+(morir|morirme)\b|\bme\s+quiero\s+morir\b/i, category: 'suicide_risk' },
-  { pattern: /\bquitarme\s+la\s+vida\b|\bacabar\s+con\s+mi\s+vida\b|\bfin\s+a\s+mi\s+vida\b/i, category: 'suicide_risk' },
-  { pattern: /\bhacerme\s+da[ñn]o\b|\blastimarme\b|\bcortarme\s+las?\s+venas?\b/i, category: 'self_harm' },
-  { pattern: /\bno\s+quiero\s+(seguir\s+)?vivir\b|\bya\s+no\s+quiero\s+vivir\b/i, category: 'suicide_risk' },
-  { pattern: /\bpastillas?\s+para\s+(morir|matarme|suicidarme)\b/i, category: 'suicide_risk' },
-  // English
-  { pattern: /\b(kill\s+myself|killing\s+myself|end\s+my\s+life|take\s+my\s+(own\s+)?life)\b/i, category: 'suicide_risk' },
-  { pattern: /\b(want\s+to\s+die|wanna\s+die|going\s+to\s+kill\s+myself)\b/i, category: 'suicide_risk' },
-  { pattern: /\b(cut\s+myself|hurt\s+myself|self(-|\s)harm)\b/i, category: 'self_harm' },
+  { pattern: /\bquiero\s+(morirme?|morir)\b|\bme\s+quiero\s+morir\b|\bdeseo\s+morir\b/i, category: 'suicide_risk' },
+  { pattern: /quitarme\s+la\s+vida|acabar\s+con\s+mi\s+vida|fin\s+(a\s+)?mi\s+vida/i, category: 'suicide_risk' },
+  { pattern: /no\s+quiero\s+(seguir\s+)?vivir|ya\s+no\s+quiero\s+vivir/i, category: 'suicide_risk' },
+  { pattern: /pastillas?\s+para\s+(morir|matarme|suicidarme)/i, category: 'suicide_risk' },
+  { pattern: /\btirarme\s+(de|desde|por)\b|\bcolgarme\b|\bahog[ae]rme\b/i, category: 'suicide_risk' },
+  // ── Spanish: self-harm ─────────────────────────────────────────────────────
+  { pattern: /hacerme\s+da[ñn]o|lastimarme|cortarme\s+las?\s+venas?/i, category: 'self_harm' },
+  { pattern: /\bme\s+corto\b|\bme\s+lastimo\b|\bme\s+hiero\b/i, category: 'self_harm' },
+  // ── Spanish: imminent danger ───────────────────────────────────────────────
+  { pattern: /voy\s+a\s+(matar|atacar|herir)\s+(a\s+alguien|a\s+una\s+persona)/i, category: 'violence_risk' },
+  // ── English ────────────────────────────────────────────────────────────────
+  { pattern: /\b(kill|end)\s+my(self|\s+own\s+life|\s+life)\b/i, category: 'suicide_risk' },
+  { pattern: /\bwant\s+to\s+die\b|\bwanna\s+die\b|\bgoing\s+to\s+kill\s+myself\b/i, category: 'suicide_risk' },
+  { pattern: /\bcut\s+myself\b|\bhurt\s+myself\b|\bself[- ]harm\b/i, category: 'self_harm' },
+  { pattern: /\btake\s+my\s+(own\s+)?life\b/i, category: 'suicide_risk' },
 ];
 
+const LLM_CLASSIFICATION_PROMPT = `You are a safety classifier for a mental health application. Your ONLY job is to determine if the user message indicates an active mental health crisis: suicidal ideation, active self-harm intent, or immediate danger to self or others.
+
+Rules:
+- ONLY flag as crisis if the message contains EXPLICIT indicators (not metaphors, not general sadness, not frustration)
+- "I want to die" = crisis. "This is killing me" (figurative) = NOT crisis.
+- Respond ONLY with valid JSON. No other text.
+
+Response format:
+{"isCrisis": boolean, "category": "suicide_risk" | "self_harm" | "violence_risk" | null}`;
+
 export class SafetyClassifier {
+  private llmClient?: Anthropic;
+
   classify(text: string): ClassificationResult {
     for (const { pattern, category } of CRISIS_PATTERNS) {
-      if (pattern.test(text)) {
-        return { isCrisis: true, category };
-      }
+      if (pattern.test(text)) return { isCrisis: true, category };
     }
     return { isCrisis: false };
+  }
+
+  async classifyAsync(text: string): Promise<ClassificationResult> {
+    // Fast keyword check first — no API call, no latency
+    const keywordResult = this.classify(text);
+    if (keywordResult.isCrisis) return keywordResult;
+
+    const platformKey = process.env.SAFETY_PROVIDER_API_KEY;
+    if (!platformKey) return keywordResult;
+
+    try {
+      return await this.classifyWithLLM(text, platformKey);
+    } catch {
+      // Classifier error: fail open (keyword result) rather than blocking all messages
+      return keywordResult;
+    }
+  }
+
+  private async classifyWithLLM(text: string, apiKey: string): Promise<ClassificationResult> {
+    if (!this.llmClient) {
+      this.llmClient = new Anthropic({ apiKey });
+    }
+
+    const response = await this.llmClient.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 80,
+      system: LLM_CLASSIFICATION_PROMPT,
+      messages: [{ role: 'user', content: text }],
+    });
+
+    const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '{}';
+    const parsed = JSON.parse(raw) as { isCrisis: boolean; category?: string | null };
+    return {
+      isCrisis: Boolean(parsed.isCrisis),
+      category: parsed.category ?? undefined,
+    };
+  }
+
+  // Reset the cached LLM client (e.g., when the platform key is rotated)
+  resetClient(): void {
+    this.llmClient = undefined;
   }
 }
 

@@ -5,18 +5,29 @@ import { decrypt, decryptJson, encrypt } from '../crypto';
 import { config } from '../config';
 import { loadChannelByPhoneId, invalidateBotCache } from './bot.service';
 import { safetyClassifier } from './safety.service';
+import { notifyCredentialError } from './notification.service';
 import * as consentService from './consent.service';
 import { getLLMProvider, LLMCredentialError, LLMRateLimitError } from '../providers/llm';
 import { getChannelProvider } from '../providers/channel';
 import type { InboundMessageJob, LLMMessage, MetaCloudCredentials, ClassificationResult } from '../types';
 
+// Triggers that invoke the ARCO data-erasure right (Spanish + English)
+const ARCO_TRIGGERS = [
+  'borrar mis datos',
+  'eliminar mis datos',
+  'borrar mi historial',
+  'eliminar mi historial',
+  'delete my data',
+  'delete my history',
+  'arco',
+  'olvidame',
+  'olvídame',
+];
+
 export async function processInboundMessage(job: InboundMessageJob): Promise<void> {
   // ── Step 1: Identify bot by phone_id ─────────────────────────────────────
   const channelWithBot = await loadChannelByPhoneId(job.phoneId);
-  if (!channelWithBot) {
-    // Unknown phone_id — nothing to do
-    return;
-  }
+  if (!channelWithBot) return;
 
   const { bot } = channelWithBot;
   const channel = channelWithBot;
@@ -34,7 +45,7 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   }
   if (endUser.paused) return;
 
-  // ── Consent flow (interactive button replies handled first) ───────────────
+  // ── Consent: interactive button replies handled first ─────────────────────
   if (job.messageType === 'interactive' && job.interactiveReply) {
     await handleInteractiveReply(job, endUser, bot.id, channelProvider, channel.phoneId, channelCreds);
     return;
@@ -44,6 +55,16 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   if (!hasConsent) {
     await consentService.sendOnboarding(bot, channelProvider, channel.phoneId, channelCreds, job.from, config.META_API_VERSION);
     return;
+  }
+
+  // ── ARCO self-service erasure (Derecho ARCO — LFPDPPP art. 28) ───────────
+  // Must run before command dispatch and before the LLM is ever called.
+  if (job.messageType === 'text' && job.textBody) {
+    const normalized = job.textBody.trim().toLowerCase();
+    if (ARCO_TRIGGERS.some(t => normalized === t || normalized.startsWith(t + ' ') || normalized.endsWith(' ' + t))) {
+      await handleARCORequest(endUser.id, bot.id, channelProvider, channel.phoneId, channelCreds, job.from);
+      return;
+    }
   }
 
   // ── Step 4: Check for configured command ──────────────────────────────────
@@ -64,8 +85,10 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   const inputText = job.textBody?.trim() ?? '';
   if (!inputText) return;
 
-  // ── Step 6: SafetyClassifier on INPUT (platform-controlled, not client LLM) ─
-  const inputSafety = safetyClassifier.classify(inputText);
+  // ── Step 6: SafetyClassifier on INPUT — platform-controlled, NOT client LLM ─
+  // Uses async classification: keyword rules first, then LLM if SAFETY_PROVIDER_API_KEY is set.
+  // The client's model is NEVER called before this check passes.
+  const inputSafety = await safetyClassifier.classifyAsync(inputText);
   if (inputSafety.isCrisis) {
     await handleCrisis(bot.id, bot.crisisConfig, endUser.id, channelProvider, channel.phoneId, channelCreds, job.from, inputSafety, 'input_detected');
     return;
@@ -73,9 +96,9 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
 
   // ── Step 7: Retrieve history + relevant knowledge ─────────────────────────
   const history = await getHistory(bot.id, endUser.id, bot.historyWindow);
-  const knowledge = await getRelevantKnowledge(bot.knowledge, inputText);
+  const knowledge = getRelevantKnowledge(bot.knowledge, inputText);
 
-  // ── Step 8: LLM call (client's provider + key) ────────────────────────────
+  // ── Step 8: LLM call (client's provider + client's key) ──────────────────
   if (!bot.llmProvider || !bot.llmModel || !bot.llmApiKeyEnc) {
     await channelProvider.sendText({ phoneId: channel.phoneId, accessToken: channelCreds.accessToken, to: job.from, text: 'El servicio no está configurado aún. Intenta más tarde.', apiVersion: config.META_API_VERSION });
     return;
@@ -85,7 +108,6 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
   const apiKey = decrypt(bot.llmApiKeyEnc);
   const systemPrompt = buildSystemPrompt(bot.systemPrompt ?? '', knowledge, bot.branding);
 
-  // Persist inbound message
   await persistMessage(bot.id, endUser.id, 'in', job.messageType === 'text' ? 'text' : 'interactive', inputText, job.waMessageId);
 
   let responseText: string;
@@ -100,11 +122,12 @@ export async function processInboundMessage(job: InboundMessageJob): Promise<voi
     });
     responseText = result.text;
   } catch (err) {
-    await handleLLMError(err, bot.id, channelProvider, channel.phoneId, channelCreds, job.from);
+    await handleLLMError(err, bot.id, bot.name, channelProvider, channel.phoneId, channelCreds, job.from);
     return;
   }
 
   // ── Step 9: SafetyClassifier on OUTPUT ────────────────────────────────────
+  // Sync is sufficient here — the costly async check already cleared the input.
   const outputSafety = safetyClassifier.classify(responseText);
   if (outputSafety.isCrisis) {
     responseText = buildCrisisMessage(bot.crisisConfig);
@@ -142,6 +165,24 @@ async function handleInteractiveReply(
   }
 }
 
+async function handleARCORequest(
+  endUserId: string,
+  botId: string,
+  channelProvider: ReturnType<typeof getChannelProvider>,
+  phoneId: string,
+  creds: MetaCloudCredentials,
+  to: string,
+): Promise<void> {
+  await consentService.deleteEndUserData(endUserId, botId);
+  await channelProvider.sendText({
+    phoneId,
+    accessToken: creds.accessToken,
+    to,
+    text: 'Tu historial de conversación y datos han sido eliminados conforme a tu solicitud (Derecho ARCO). Si deseas continuar usando el servicio, escríbeme de nuevo.',
+    apiVersion: config.META_API_VERSION,
+  });
+}
+
 function matchCommand(commands: BotCommand[], text: string): BotCommand | undefined {
   const lower = text.trim().toLowerCase().replace(/^\//, '');
   return commands.find(c => c.trigger.toLowerCase() === lower);
@@ -160,22 +201,18 @@ async function executeCommand(
       await channelProvider.sendText({ phoneId, accessToken: creds.accessToken, to, text: payload.message, apiVersion: config.META_API_VERSION });
     }
   }
-  // 'action' type responses are handled in future phases
 }
 
 async function getHistory(botId: string, endUserId: string, windowSize: number): Promise<LLMMessage[]> {
   const msgs = await db.message.findMany({
     where: { botId, endUserId },
     orderBy: { createdAt: 'desc' },
-    take: windowSize * 2, // pairs of in/out
+    take: windowSize * 2,
   });
-
-  return msgs
-    .reverse()
-    .map(m => ({
-      role: m.direction === 'in' ? ('user' as const) : ('assistant' as const),
-      content: decrypt(m.bodyEnc),
-    }));
+  return msgs.reverse().map(m => ({
+    role: m.direction === 'in' ? ('user' as const) : ('assistant' as const),
+    content: decrypt(m.bodyEnc),
+  }));
 }
 
 function getRelevantKnowledge(knowledge: BotKnowledge[], query: string): string {
@@ -195,12 +232,8 @@ function buildSystemPrompt(
   branding: { companyName?: string | null; supportContact?: string | null } | null | undefined,
 ): string {
   let prompt = basePrompt;
-  if (knowledge) {
-    prompt += `\n\n---\nBase de conocimiento relevante:\n${knowledge}\n---`;
-  }
-  if (branding?.supportContact) {
-    prompt += `\n\nContacto de soporte: ${branding.supportContact}`;
-  }
+  if (knowledge) prompt += `\n\n---\nBase de conocimiento relevante:\n${knowledge}\n---`;
+  if (branding?.supportContact) prompt += `\n\nContacto de soporte: ${branding.supportContact}`;
   return prompt;
 }
 
@@ -213,14 +246,7 @@ async function persistMessage(
   externalId?: string,
 ): Promise<void> {
   await db.message.create({
-    data: {
-      botId,
-      endUserId,
-      direction,
-      inputType,
-      bodyEnc: encrypt(body),
-      externalId: externalId ?? null,
-    },
+    data: { botId, endUserId, direction, inputType, bodyEnc: encrypt(body), externalId: externalId ?? null },
   });
 }
 
@@ -240,17 +266,15 @@ async function handleCrisis(
   await channelProvider.sendText({ phoneId, accessToken: creds.accessToken, to, text: message, apiVersion: config.META_API_VERSION });
 }
 
-function buildCrisisMessage(crisisConfigs: BotCrisisConfig[]): string {
+export function buildCrisisMessage(crisisConfigs: BotCrisisConfig[]): string {
   const enabled = crisisConfigs.filter(c => c.enabled);
   if (!enabled.length) {
     return 'Parece que estás pasando por un momento difícil. Por favor, busca apoyo con alguien de confianza o llama a una línea de crisis.\n\nMéxico:\n• SAPTEL: 55 5259-8121 (24h)\n• Línea de la Vida: 800 911 2000 (24h)';
   }
-
   const lines = enabled.flatMap(c => {
     const l = c.lines as Array<{ name: string; phone: string; hours?: string }>;
     return l.map(line => `• ${line.name}: ${line.phone}${line.hours ? ` (${line.hours})` : ''}`);
   });
-
   return `Parece que estás pasando por un momento muy difícil. No estás solo/a. Por favor comunícate con:\n\n${lines.join('\n')}`;
 }
 
@@ -261,22 +285,26 @@ async function recordCrisisEvent(botId: string, endUserId: string, category: str
 async function handleLLMError(
   err: unknown,
   botId: string,
+  botName: string,
   channelProvider: ReturnType<typeof getChannelProvider>,
   phoneId: string,
   creds: MetaCloudCredentials,
   to: string,
 ): Promise<void> {
   if (err instanceof LLMCredentialError) {
-    // Mark the bot and stop — do not retry
     await db.bot.update({ where: { id: botId }, data: { status: 'credential_error' } });
     invalidateBotCache(botId);
+    notifyCredentialError({
+      botId,
+      botName,
+      errorMessage: (err as Error).message,
+      detectedAt: new Date(),
+    });
     await channelProvider.sendText({ phoneId, accessToken: creds.accessToken, to, text: 'El servicio no está disponible en este momento. Inténtalo más tarde.', apiVersion: config.META_API_VERSION });
     return;
   }
   if (err instanceof LLMRateLimitError) {
-    // Re-throw so BullMQ retries with backoff
-    throw err;
+    throw err; // BullMQ retries with backoff
   }
-  // Unknown error — re-throw for BullMQ retry
   throw err;
 }
