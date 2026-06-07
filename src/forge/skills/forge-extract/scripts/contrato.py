@@ -1,93 +1,83 @@
+#!/usr/bin/env python3
 """
-Contrato de tipos para forge-extract.
+Contrato universal del extractor forge-extract.
 
-Define las estructuras compartidas entre el orquestador y los adaptadores.
-Todos los scripts de forge-extract importan desde aquí.
+Define la frontera entre el orquestador y los adaptadores. El orquestador NO sabe
+extraer de ninguna fuente; sabe que todo adaptador recibe una fuente del plan y
+devuelve un ResultadoExtraccion en el schema común. Cualquier fuente nueva queda
+soportada agregando un adaptador que cumpla este contrato — sin tocar el orquestador.
 
-Invariante de formato del registro_id: "src-N:rM"
-  N = índice base-1 de la fuente en el plan (1, 2, 3…)
-  M = contador base-0 de registro dentro de esa fuente (0, 1, 2…)
-  El orquestador sella el registro_id — los adaptadores NO lo asignan.
+Este módulo no extrae nada: solo define las formas. Es el equivalente al schema
+YAML universal del ENGINE, aplicado a la extracción.
 """
 
 from __future__ import annotations
+from dataclasses import dataclass, field, asdict
+from typing import Any, Protocol
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Protocol, runtime_checkable
 
+# ─── El schema común de salida ────────────────────────────────────────────────
+#
+# Todo dato extraído, venga de una API, un feed, una web o un archivo, se normaliza
+# a este registro. El resto del operador (análisis, entrega) consume SIEMPRE este
+# formato, nunca el formato crudo de la fuente. Esa uniformidad es lo que permite
+# que un mismo skill de análisis sirva para datos de cualquier origen.
 
 @dataclass
 class Registro:
-    """Un único registro de datos obtenido de una fuente."""
+    """Una unidad de dato normalizada, agnóstica de su fuente."""
+    contenido: str                      # el texto/dato principal, normalizado
+    fuente: str                         # nombre de la fuente de la que vino
+    metodo_acceso: str                  # cómo se obtuvo (api, feed, web, ...)
+    registro_id: str | None = None      # id único del registro (lo sella el orquestador);
+                                        # forge-analyze lo usa para enlazar evidencia
+    datos_cubiertos: list[str] = field(default_factory=list)  # qué datos_requeridos satisface
+    metadatos: dict[str, Any] = field(default_factory=dict)   # fecha, autor, url, etc. (libre)
+    obtenido_en: str | None = None      # timestamp ISO de la extracción
 
-    contenido: str                   # texto extraído
-    fuente: str                      # id de la fuente en el plan (estable, único)
-    metodo_acceso: str               # api|feed|web|archivo_cliente|dataset_abierto
-    datos_cubiertos: list[str]       # subset de datos_requeridos que este registro aporta
-    metadatos: dict                  # url/path/timestamp/keys específicos del adaptador
-    obtenido_en: str                 # ISO 8601 UTC
-
-    # Sellado por el orquestador DESPUÉS de que el adaptador devuelve el registro
-    registro_id: str = field(default="")
-
-    def __post_init__(self) -> None:
-        if not self.contenido:
-            raise ValueError("Registro.contenido no puede estar vacío.")
-        if not self.fuente:
-            raise ValueError("Registro.fuente no puede estar vacío.")
-        if not self.metodo_acceso:
-            raise ValueError("Registro.metodo_acceso no puede estar vacío.")
-        if not self.obtenido_en:
-            raise ValueError("Registro.obtenido_en no puede estar vacío.")
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
 class ResultadoExtraccion:
-    """Output completo de una pasada de extracción."""
+    """Lo que un adaptador devuelve al orquestador para una fuente."""
+    fuente: str
+    metodo_acceso: str
+    estado: str                         # 'ok' | 'parcial' | 'error' | 'degradado'
+    registros: list[Registro] = field(default_factory=list)
+    error: str | None = None            # mensaje si estado es 'error'
+    nota: str | None = None             # explicación si 'parcial' o 'degradado'
 
-    registros: list[Registro]
-    fuentes_usadas: list[str]        # ids de fuentes de las que se obtuvo al menos un registro
-    fuentes_omitidas: list[str]      # ids de fuentes que se omitieron con su razón
-    cobertura_pct: float             # calculada honestamente por el orquestador
-    datos_cubiertos: list[str]       # intersection(datos_cubiertos de registros, datos_requeridos)
-    datos_faltantes: list[str]       # datos_requeridos sin cobertura
-    requiere_revision_humana: bool   # propagado desde el plan — no es decisión del extractor
-    extraido_en: str                 # ISO 8601 UTC
-
-    def __post_init__(self) -> None:
-        if not (0.0 <= self.cobertura_pct <= 100.0):
-            raise ValueError(f"cobertura_pct fuera de rango: {self.cobertura_pct}")
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["registros"] = [r.to_dict() for r in self.registros]
+        return d
 
 
-@runtime_checkable
+ESTADOS_RESULTADO = {"ok", "parcial", "error", "degradado"}
+
+
+# ─── La interfaz que todo adaptador cumple ────────────────────────────────────
+#
+# El orquestador depende de esta forma, no de implementaciones concretas. Un
+# adaptador es cualquier cosa que sepa, dada una fuente del plan y las credenciales
+# que el cliente aportó (si las hay), devolver un ResultadoExtraccion. Punto.
+
 class Adaptador(Protocol):
-    """
-    Interfaz que todo adaptador de extracción debe implementar.
+    # cada adaptador declara qué metodo_acceso maneja
+    metodo: str
 
-    obtener(fuente, credenciales) → list[Registro]
+    def extraer(self, fuente: dict[str, Any], credenciales: dict[str, Any] | None) -> ResultadoExtraccion:
+        """
+        fuente: una entrada del plan de forge-sources (estado, metodo_acceso,
+                datos_que_cubre, metadatos de acceso como url/endpoint/path).
+        credenciales: lo que el cliente aportó para fuentes condicionales (BYO),
+                      o None si la fuente es disponible sin credencial.
+        Devuelve un ResultadoExtraccion en el schema común.
 
-    La fuente es el objeto del plan (con id, metodo_acceso, metadatos, etc.).
-    Las credenciales son las del cliente (BYO) asociadas al fuente.id.
-    El adaptador NO asigna registro_id — eso lo hace el orquestador.
-
-    Si la fuente no tiene datos disponibles en este momento, devolver lista vacía.
-    Si hay un error irrecuperable, lanzar excepción (el orquestador la captura y registra).
-    """
-
-    def obtener(self, fuente: dict, credenciales: dict) -> list[Registro]:
+        Un adaptador NUNCA intenta una fuente que no le corresponde, y NUNCA
+        elude un límite: si la fuente requiere algo que no tiene, devuelve estado
+        'error' con explicación, no fuerza el acceso.
+        """
         ...
-
-
-def ahora_iso() -> str:
-    """Timestamp ISO 8601 UTC del momento actual."""
-    return datetime.now(timezone.utc).isoformat()
-
-
-def sellar_registro_id(registro: Registro, src_idx: int, r_idx: int) -> None:
-    """
-    Sella el registro_id en el registro IN-PLACE.
-    Formato: "src-N:rM" — N base-1, M base-0.
-    Solo llamar desde el orquestador.
-    """
-    registro.registro_id = f"src-{src_idx}:r{r_idx}"

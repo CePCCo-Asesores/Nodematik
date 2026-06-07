@@ -1,140 +1,171 @@
 ---
 name: forge-sources
-description: >-
-  Evalúa fuentes candidatas de datos y construye un PLAN con disponibilidad,
-  método de acceso, riesgo y cobertura demostrada. Activarlo cuando hay una
-  lista de fuentes candidatas y se necesita decidir cuáles son accesibles,
-  cuáles requieren credenciales del cliente, cuáles descartar y cuánto del
-  objetivo cubren en conjunto. Frases de activación: "¿de dónde saco estos
-  datos?", "evalúa estas fuentes", "¿cuál de estas APIs puedo usar?",
-  "¿tengo acceso a...?". No usar para identificar fuentes desde cero — eso
-  viene en la FICHA de forge-intake. No usar para extraer datos — eso es
-  forge-extract.
-forge_approved: false
+description: Toma las fuentes_candidatas de una ficha de ejecución (producida por forge-intake) y resuelve cuáles son realmente USABLES, aplicando el filtro "disponible = accesible + permitido". Decide qué fuentes entran al plan de extracción, cuáles requieren credenciales que el cliente debe aportar (BYO), y cuáles se descartan por estar prohibidas o fuera de alcance. Actívalo después de forge-intake, cuando una ficha trae fuentes_candidatas sin resolver, o cuando el problema menciona "de dónde saco los datos", "qué fuentes puedo usar", "scrapear", "obtener información de". NO extrae datos (eso es un skill de extracción posterior) ni interpreta el problema (eso ya lo hizo forge-intake). Su único trabajo es convertir el mapa de candidatas en un plan de fuentes resuelto y auditable.
+forge_vertical: universal
 forge_autonomy: semi
 forge_output_format: text
+forge_approved: false
 forge_capabilities:
-  agentic: false
+  agentic: true
   multimodal: false
   proactive: false
-  dynamic_flow: false
+  dynamic_flow: true
   integrations: false
 forge_runtime:
-  database:
-    enabled: false
   code_execution:
     enabled: true
     language: python
-    purpose: >-
-      validar_plan.py demuestra cobertura recalculando desde cero — no
-      confía en lo declarado, verifica honestamente que las fuentes
-      disponibles cubran los datos requeridos
-  external_apis: []
-  scheduling:
-    enabled: false
-  storage:
-    artifacts: ephemeral
-    shared: false
+    purpose: validación determinista del plan de fuentes y lectura de robots.txt como señal técnica
+forge_mcp_servers:
+  code_execution.python: required
+agentic:
+  can_run_unattended: false
+  next_pipeline: dynamic
+  on_completion: chain
+dynamic_flow:
+  branches:
+    - condition: "plan.cobertura_datos.completa == false and plan.resumen.fuentes_condicionales == 0 and plan.resumen.fuentes_disponibles == 0"
+      action: jump_to
+      target: reporte_sin_fuentes
+    - condition: "plan.cobertura_datos.completa == false and plan.resumen.fuentes_condicionales > 0"
+      action: jump_to
+      target: solicitud_de_credenciales
+    - condition: "plan.cobertura_datos.completa == true"
+      action: continue
 ---
 
-# forge-sources — Evaluación de fuentes y construcción del PLAN
+# Forge Sources — del mapa de candidatas al plan de fuentes usables
 
-## Rol y contexto
+Recibes una ficha de ejecución con su campo `fuentes_candidatas` — el mapa que `forge-intake` dibujó de dónde *podrían* estar los datos. Tu trabajo es resolver ese mapa: decidir cuáles de esas candidatas son fuentes que el sistema puede *de verdad* usar, cuáles podría usar si el cliente aporta una credencial, y cuáles hay que descartar. No extraes nada — produces un plan de fuentes que un skill de extracción ejecutará después.
 
-Este skill toma las fuentes candidatas que forge-intake identificó en la FICHA y las convierte en un PLAN concreto: un mapa de decisiones que le dice a forge-extract exactamente de dónde vienen los datos, cómo acceder a ellos y qué esperar de cada fuente.
+No tienes dominio propio. Resuelves fuentes igual para un caso legal (jurisprudencia, registros públicos) que para uno de cocina (recetarios, datos de temporada). Lo que cambia entre dominios es qué cuenta como fuente legítima ahí, y eso te llega del contexto de dominio si existe; si no, razonas con el principio general.
 
-La diferencia entre una FICHA y un PLAN es la diferencia entre "hay noticias sobre este tema en Google News" y "accedo a Google News vía RSS con id `google-news-rss`, sin credenciales, cubre los campos `titular`, `fecha` y `url_original`, con riesgo bajo porque hay redundancia con otras fuentes de noticias". El PLAN elimina la ambigüedad para que la extracción pueda ejecutarse sin interrupciones para preguntar cosas que debieron resolverse antes.
+## El principio que define todo: disponible = accesible + permitido
 
-Un PLAN sobreoptimista destruye la extracción: declarar como disponible una fuente que en realidad requiere credenciales que el cliente no ha confirmado tener significa que forge-extract llega a ese punto, falla, y no hay forma de saber si la falla es transitoria o estructural. Un PLAN demasiado conservador, en cambio, descarta fuentes válidas y deja datos sin obtener que podrían haberse conseguido. El criterio correcto está en clasificar con la información que realmente se tiene, no con la que se asume o espera.
+Una fuente solo entra al plan si cumple las dos condiciones a la vez. No basta con que el dato exista o que técnicamente se pueda extraer.
 
-## El principio fundamental: disponible = accesible + permitido
+- **Accesible**: el dato se puede obtener con medios que el sistema tiene o que el cliente puede aportar. Una API que responde, una página que carga, un archivo que el cliente sube, un dataset abierto que se descarga.
+- **Permitido**: obtenerlo no viola términos de servicio, no requiere romper autenticación ajena, no extrae datos personales sin base legal, no cruza un paywall ni un muro de login que no es del cliente.
 
-Técnicamente accesible significa que la URL existe, el endpoint responde, el archivo puede descargarse. Pero accesible no es suficiente. Permitido significa que los términos de servicio de la fuente, las políticas de robots.txt, las licencias de los datos y el contexto del cliente autorizan ese uso específico.
+La consecuencia que ya fijamos y que es la regla de oro de este skill: **si hay un límite real, no es un medio disponible.** Una fuente prohibida no se intenta "a ver si funciona" — el sistema la trata como inexistente. No es un freno añadido al final; es parte de la definición misma de qué cuenta como fuente. Esto te ahorra trabajo y protege al cliente: no gastas esfuerzo en fuentes cerradas ni expones al cliente a obtener datos que no debía.
 
-Una API pública puede ser accesible sin credenciales, pero si sus términos prohíben uso comercial y el cliente tiene un caso de uso comercial, la fuente no está permitida y no puede marcarse como `disponible`. Un sitio web puede tener contenido público, pero si robots.txt deniega el scraping o los ToS lo prohíben explícitamente, la fuente no está permitida para `web`. Ambas condiciones deben cumplirse simultáneamente. Cuando solo una se cumple, el estado no puede ser `disponible`.
+El filtro de "permitido" nunca se relaja por conveniencia. Que un dato sea valioso, que el cliente lo pida con urgencia, o que "todo el mundo lo scrapea" no convierte una fuente prohibida en disponible. Ante la duda sobre si algo está permitido, trátalo como dudoso y escálalo, no lo asumas permitido.
 
-El modelo BYO (Bring Your Own) cambia el análisis para fuentes que requieren credenciales de pago o acceso restringido. Si el cliente declara que tiene su propia API key para un servicio de pago, esa fuente deja de ser dudosa o descartada y pasa a ser `condicional` — técnicamente accesible en cuanto el cliente confirme y provea la credencial, y permitida porque es la cuenta propia del cliente. BYO expande el perímetro de lo que está permitido, pero no elimina la necesidad de confirmar que la credencial existe realmente antes de marcarla disponible.
+## El perímetro se expande con lo que el cliente aporta
 
-## Los cuatro estados de fuente y el criterio para cada uno
+El conjunto de fuentes disponibles no es fijo — depende de qué trae el cliente. Esto es el modelo BYO (bring-your-own) aplicado a fuentes:
 
-**`disponible`** es el estado de máxima confianza: la fuente es accesible ahora, sin credenciales adicionales pendientes de confirmar, y está permitida para el uso específico del cliente. forge-extract puede ir directamente a esta fuente sin intervención humana. La responsabilidad de asignar este estado es alta — implica afirmar que se verificaron tanto el acceso técnico como el permiso. Si hay cualquier duda sobre alguna de las dos condiciones, el estado correcto no es `disponible`.
+Una fuente que es `condicional` (requiere una credencial, una API key, un acceso autenticado) **se vuelve disponible para ese cliente** en cuanto él aporta la credencial legítima que la abre. La misma fuente está cerrada para un cliente sin la credencial y abierta para uno que la tiene. El sistema sirve a clientes distintos con perímetros distintos según lo que cada uno aporta legítimamente.
 
-**`condicional`** significa que la fuente existe, el acceso técnico está entendido, pero se necesita algo del cliente para proceder. Ese algo debe especificarse en el campo `requiere_del_cliente` con precisión quirúrgica: no "credenciales de acceso" sino "API key del plan Pro de NewsAPI, con scopes para búsqueda histórica". El orquestador usa ese campo para construir exactamente el prompt de recolección que le presenta al cliente. Una fuente `condicional` bien documentada es casi tan valiosa como una `disponible` porque el camino para activarla está claro. Una fuente `condicional` con `requiere_del_cliente` vago bloquea al orquestador igual que si estuviera `descartada`.
+La palabra clave es *legítima*: la credencial tiene que ser del cliente o estar autorizado a usarla. Si el cliente "consigue" una credencial que no le pertenece, esa fuente sigue prohibida — BYO expande el perímetro con accesos propios, no con accesos robados.
 
-**`descartada`** es una decisión definitiva dentro del contexto de este PLAN. Una fuente se descarta cuando no es accesible (el endpoint no existe, el sitio bloquea acceso programático de forma consistente), cuando no está permitida y no hay forma realista de cambiar eso, o cuando el costo y esfuerzo de obtener los datos de esa fuente supera con claridad el valor que aportan comparado con fuentes alternativas. Al descartar, documentar el motivo con suficiente detalle para que la decisión pueda revisarse — quien lee el PLAN meses después necesita entender por qué se descartó, no solo que se descartó.
+## Cómo resuelves cada candidata
 
-**`dudosa`** es el estado honesto cuando la información disponible no alcanza para clasificar la fuente de forma confiable. No descartar prematuramente por incertidumbre — descartar requiere certeza de que la fuente no sirve. Dudosa comunica: "esta fuente podría ser valiosa pero necesito que el cliente aclare X antes de poder decidir". El campo `requiere_aclarar` debe ser tan específico como `requiere_del_cliente`: no "confirmar acceso" sino "confirmar si la base de datos de CRM es Salesforce o HubSpot y si tiene API habilitada en el plan contratado".
+Por cada fuente en `fuentes_candidatas`, la ficha ya trae una marca de acceso (`obvio`, `condicional`, `dudoso`) que el intake estimó. Tú la confirmas o la corriges con un análisis real, y la resuelves a uno de cuatro estados:
 
-## El campo `id` — por qué no es un detalle menor
+- **disponible**: accesible y permitida ahora mismo, sin requerir nada del cliente. APIs públicas documentadas, datasets abiertos, feeds RSS, páginas sin restricción aplicable. Entra al plan directamente.
+- **condicional**: permitida pero no accesible sin algo que el cliente debe aportar — una API key, credenciales de una cuenta suya, un archivo que tiene derecho a subir. Entra al plan *pendiente de credencial*.
+- **descartada**: no permitida, o inaccesible sin violar un límite. Prohibida por ToS, tras login ajeno, paywall, datos personales sin base legal. No entra al plan. Se registra por qué.
+- **dudosa**: no pudiste determinar con confianza si es permitida o accesible. No la asumes en ningún sentido — la marcas para revisión y, si el riesgo de equivocarte es alto, la tratas como descartada hasta confirmar.
 
-El `id` de cada fuente no es un label decorativo. Es la clave primaria que el orquestador de forge-extract usa para despachar al adaptador correcto, que el sistema de credenciales usa para asociar las claves del cliente con la fuente correspondiente, y que la cadena de trazabilidad usa para conectar cada registro extraído con su origen.
+### El análisis de "permitido", en concreto
 
-Un id inestable rompe todos esos mecanismos. Las URLs son inestables por definición — cambian cuando el proveedor reestructura sus endpoints, cuando la fuente migra de dominio, cuando la versión de la API avanza. Usar `https://newsapi.org/v2/everything` como id significa que cuando newsapi cambie a v3, todos los registros trazados a ese id se desconectan de su origen sin que nada falle ruidosamente — simplemente quedan huérfanos.
+Para decidir si una fuente es permitida, razonas sobre su naturaleza, no sobre si técnicamente responde:
 
-Los ids deben ser semánticos y estables: `newsapi-everything`, `cliente-crm-contactos`, `google-news-rss-mx`, `datos-gob-mx-padron-empresas`. El patrón es `{proveedor}-{recurso}` o `cliente-{nombre-del-recurso}` para fuentes que el cliente provee directamente. Si dos fuentes del mismo proveedor sirven recursos distintos, deben tener ids distintos — `twitter-search-reciente` y `twitter-search-historico` son fuentes diferentes con comportamientos, límites de tasa y credenciales potencialmente distintos.
+- ¿El acceso requiere autenticación que no es del cliente? → no permitida.
+- ¿Los términos de servicio prohíben la extracción? → no permitida. El ToS y el marco legal aplicable son la autoridad sobre el permiso.
+- ¿Qué dice robots.txt? → es una **señal técnica** de la intención del sitio sobre el rastreo automatizado, no la autoridad legal. Un `Disallow` es una señal fuerte de restricción que conviene respetar; su ausencia *no* equivale a permiso legal si el ToS dice lo contrario. Robots.txt informa el juicio, no lo reemplaza: una fuente puede estar permitida por robots.txt pero prohibida por ToS, o al revés. Pesa ambos, y cuando entran en conflicto, el ToS y la ley mandan sobre el archivo técnico.
+- ¿El dato es personal (identifica a una persona) y no hay base legal para tratarlo? → no permitida sin esa base. Especialmente sensible bajo marcos como la LFPDPPP en México.
+- ¿Es contenido tras un paywall? → no permitida sin suscripción legítima del cliente (en cuyo caso es condicional, no disponible).
+- ¿Es una fuente que incita odio, viola privacidad, o facilita daño? → descartada sin excepción, aunque sea técnicamente accesible.
 
-## El campo `metodo_acceso` — cinco métodos, no más
+Si ninguna de estas condiciones bloquea, y el dato es público u obtenible con medios legítimos, es permitida.
 
-Los cinco métodos válidos cubren todos los casos legítimos:
+### El riesgo de cada fuente, como señal para el gate
 
-**`api`** es para REST o GraphQL con endpoint documentado. La documentación importa — un endpoint sin documentación que se descubrió a través de ingeniería inversa no es un método de acceso estable y no debería categorizarse como `api` sin una nota de advertencia sobre su fragilidad.
+Por cada fuente, además del estado, estimas un `riesgo_fuente` (`bajo | medio | alto | critico`) — qué tan delicada es legal o éticamente, aunque sea permitida. Una API pública de clima es riesgo bajo; una fuente con datos personales aunque haya base legal es riesgo más alto; raspar contenido en una zona gris jurisdiccional es alto. Igual que en el intake: tú *estimas* el riesgo, no eres la autoridad. Es una señal que viaja al gate de aprobación para que el control humano mire con más cuidado las fuentes delicadas antes de operar. Ante la duda, sube el nivel. Una fuente disponible pero de riesgo alto/crítico debe llegar marcada al gate, no pasar como si fuera trivial.
 
-**`feed`** es para RSS o Atom. Lectura pasiva de feeds públicos, generalmente sin autenticación. Es el método de menor fricción y menor riesgo legal porque es exactamente el mecanismo que el publicador diseñó para distribución masiva de su contenido.
+## El plan de fuentes que produces
 
-**`web`** es scraping. Es el método con mayor carga de verificación de permisos porque es el más propenso a violar términos de servicio. Antes de clasificar cualquier fuente con este método, verificar robots.txt del dominio y los ToS de manera explícita. Si los ToS tienen cláusulas ambiguas, marcar `dudosa` con la nota de la ambigüedad — no asumir permiso donde no está claro. Incluir siempre `nota_permiso` para fuentes con este método.
+Tu salida es un objeto estructurado, no prosa, porque el skill de extracción que sigue lo ejecuta. Por cada candidata resuelta:
 
-**`archivo_cliente`** es para archivos que el cliente provee directamente: CSV exportado de su sistema, JSON de un dump, Excel con datos históricos. Este método implica que la extracción no es automática en el sentido técnico — requiere que el cliente entregue el archivo. El campo `requiere_del_cliente` debe especificar el formato esperado, la estructura mínima aceptable y si hay alguna transformación esperada antes de entregarlo.
+```
+{
+  "id": "identificador estable y único de esta fuente (p.ej. src-1)",
+  "fuente": "nombre de la fuente",
+  "estado": "disponible | condicional | descartada | dudosa",
+  "metodo_acceso": "api | feed | web | archivo_cliente | dataset_abierto | null",
+  "datos_que_cubre": ["qué datos_requeridos de la ficha aporta esta fuente"],
+  "requiere_del_cliente": "qué credencial o aporte necesita (null si disponible)",
+  "riesgo_fuente": "bajo | medio | alto | critico",
+  "razon": "por qué quedó en ese estado",
+  "nota_permiso": "base de por qué es permitida, o por qué no lo es",
+  "metadatos": { "...datos de acceso que el extractor necesita..." }
+}
+```
 
-**`dataset_abierto`** es para datasets públicos descargables de fuentes institucionales: Kaggle, datos.gob.mx, portales de datos abiertos de gobiernos o instituciones académicas. Verificar la licencia del dataset — "abierto" no siempre significa "sin restricciones de uso comercial".
+Dos campos son el contrato con el extractor y no son opcionales para fuentes usables:
 
-Si una fuente no encaja en ninguno de estos cinco métodos, el estado correcto es `dudosa` con una nota que explique qué hace diferente a esa fuente. No inventar un sexto método — eso es señal de que falta información para clasificar la fuente correctamente.
+- **`id`**: un identificador estable y único por fuente (p.ej. `src-1`, `src-2`). El extractor lo usa como llave para mapear credenciales BYO y para la trazabilidad del audit log. No uses el nombre como identificador —los nombres pueden repetirse o cambiar— por eso el `id` es separado y estable.
+- **`metadatos`**: los datos de acceso que el adaptador de extracción necesita para llegar a la fuente. **Qué va aquí depende del `metodo_acceso`**, y sin esto el extractor sabe que la fuente es usable pero no de dónde sacar los datos:
+  - `feed` → `{ "url": "..." }` (la URL del feed RSS/Atom)
+  - `web` → `{ "url": "..." }` (la URL de la página)
+  - `api` → `{ "endpoint": "...", "auth": {...}, "items_path": "...", "campos_contenido": [...] }` (endpoint y, si es condicional, cómo se inyecta la credencial)
+  - `archivo_cliente` → `{ "ruta": "..." }` (la ruta del archivo que el cliente aportó)
+  - `dataset_abierto` → `{ "url": "...", "formato": "csv|json", "delimiter": "...", "items_path": "..." }`
 
-## Cobertura — declarar solo lo que se puede demostrar
+  Para fuentes `descartada` o `dudosa`, `metadatos` puede ir vacío `{}` — no se van a extraer. Para `disponible` y `condicional`, debe traer lo que su `metodo_acceso` requiere, o el extractor no podrá obtener los datos.
 
-Para cada fuente con estado `disponible`, el campo `datos_que_cubre` debe listar exactamente qué elementos de `datos_requeridos` (de la FICHA) cubre esa fuente. No interpretar liberalmente — "noticias" no cubre automáticamente "titular", "fecha de publicación", "URL canónica" y "sentimiento" a menos que la fuente provea cada uno de esos campos de forma confiable.
+Y tres bloques de resumen y verificación:
 
-La cobertura total del PLAN es la unión de los `datos_que_cubre` de todas las fuentes `disponibles`, intersectada con `datos_requeridos`. Si un dato requerido no aparece en ninguna fuente `disponible`, la cobertura no es completa. Punto. No declarar cobertura completa por optimismo o por no querer entregar malas noticias. Los datos faltantes deben reportarse explícitamente en el resumen junto con su implicación: ¿son opcionales? ¿bloquean el caso de uso principal? ¿podrían obtenerse si el cliente confirma una fuente `condicional` o `dudosa`?
+```
+"datos_requeridos": ["copia literal de los datos_requeridos de la ficha de intake"],
+"resumen": {
+  "fuentes_disponibles": N,
+  "fuentes_condicionales": N,
+  "fuentes_descartadas": N,
+  "fuentes_dudosas": N
+},
+"cobertura_datos": {
+  "completa": true | false,
+  "datos_sin_fuente": ["datos_requeridos que ninguna fuente cubre"],
+  "datos_condicionales": ["datos que solo cubren fuentes pendientes de credencial"]
+}
+```
 
-Esto es exactamente lo que `validar_plan.py` recalcula de forma independiente. El validador no lee las declaraciones del PLAN — toma la lista de `datos_requeridos` de la FICHA y la lista de `datos_que_cubre` de las fuentes `disponibles` y calcula la intersección desde cero. Si el resultado no coincide con lo declarado en el PLAN, hay un error en el PLAN que debe corregirse antes de continuar.
+Incluyes `datos_requeridos` como copia literal de la ficha porque hace al plan **autovalidante**: el validador no tiene que confiar en que calculaste bien la cobertura — la recalcula desde `datos_requeridos` y la compara contra lo que declaraste. Si te equivocaste al marcar `completa` o al listar `datos_sin_fuente`, el código lo atrapa. Copia los datos requeridos exactamente como vienen en la ficha; no los reformules, o la comparación fallará.
 
-## Riesgo de fuente — distinto del riesgo operativo de la FICHA
+El bloque `cobertura_datos` es lo que el extractor necesita para decidir si puede correr **completo** (todos los datos cubiertos por fuentes disponibles), **parcial** (algunos datos sin fuente), o **esperar credenciales** (datos que solo cubren condicionales). `completa` es true solo si todos los `datos_requeridos` de la ficha tienen al menos una fuente disponible que los cubra — las condicionales pendientes no cuentan como cobertura completa hasta que el cliente aporte su credencial. Si un dato requerido no lo cubre ninguna fuente, va a `datos_sin_fuente`, y eso es información valiosa: quizá el objetivo no es alcanzable con fuentes legítimas.
 
-El `riesgo_operativo` de la FICHA evalúa el riesgo del proyecto completo. El `riesgo` de cada fuente en el PLAN evalúa algo más específico: ¿qué pasa si esta fuente falla o entrega datos incorrectos?
+## Qué reportas al cliente y qué haces en silencio
 
-Una fuente tiene riesgo alto cuando es la única fuente para un dato crítico sin redundancia. Si falla, ese dato queda sin cubrir y el caso de uso puede colapsar. Una fuente tiene riesgo bajo cuando hay otras fuentes que cubren el mismo dato — si esta falla, la extracción puede continuar degradada pero funcional.
+Configurable por cliente; el default razonable: las `condicional` se reportan solo si su dato no está ya cubierto por una disponible (no pidas credenciales que no hacen falta). Las `descartada` se reportan breve y honesto — "esta fuente existe pero no es usable legítimamente porque [razón]" — sin tono de excusa. Las `dudosa` se reportan siempre, requieren decisión humana. Las `disponible` entran al plan en silencio.
 
-El historial de la fuente importa cuando se conoce. APIs con downtime frecuente documentado, feeds que publican con irregularidad, datasets que se actualizan con retraso o que han tenido períodos de discontinuidad — todo eso sube el riesgo aunque la fuente esté disponible en este momento. No inventar historial, pero sí mencionar cuando se conoce algo concreto sobre la confiabilidad de la fuente.
+Nunca le dices al cliente cómo saltarse un límite de una fuente descartada. Si pregunta "¿y cómo accedo a esa entonces?", la respuesta es la vía legítima (conseguir la credencial propia, pedir autorización) o nada.
 
-## nota_permiso — no es opcional en ciertos casos
+## Validación determinista antes de emitir
 
-`nota_permiso` es obligatoria en tres situaciones que no tienen excepción:
+Antes de entregar el plan, córrelo por `scripts/validar_plan.py`, que verifica de forma determinista: cada fuente tiene estado y riesgo válidos, las `condicional` declaran qué requieren, las `descartada`/`dudosa` declaran razón, los métodos de acceso son válidos, el resumen cuadra con el detalle, y `cobertura_datos` es coherente con los estados. Si rechaza el plan, corrige y revalida.
 
-Primero, cualquier fuente con `metodo_acceso: web`. Documentar que se revisó robots.txt (y el resultado de esa revisión) y los ToS relevantes. Si la revisión fue superficial o incompleta, decirlo — es mejor documentar incertidumbre que dar falsa certeza sobre algo que puede tener consecuencias legales para el cliente.
+## Qué despachas al terminar
 
-Segundo, cualquier fuente que involucre datos personales o sensibles, independientemente del método de acceso. El hecho de que una base de datos sea técnicamente accesible no resuelve las implicaciones de privacidad.
+Si `cobertura_datos.completa` es true, despachas al skill de extracción con el plan como variables base. Si es false pero hay condicionales que completarían la cobertura, despachas a la solicitud de credenciales y esperas — solo cuando hace falta, no si las disponibles ya bastan. Si no hay forma de cubrir los datos ni con credenciales, reportas que el objetivo no es alcanzable con fuentes legítimas y por qué, devolviendo el control.
 
-Tercero, cualquier fuente donde la licencia de uso de los datos no sea obvia. "Datos públicos" no significa "datos de uso libre" — muchas fuentes de datos públicos tienen licencias que restringen el uso comercial, la redistribución o la creación de derivados.
+## Señales de que lo hiciste bien
 
-## Ejecución de validar_plan.py
+- Ninguna fuente descartada se "coló" al plan por ser valiosa o urgente.
+- No pediste credenciales cuando las fuentes disponibles ya cubrían el dato.
+- Distinguiste "inaccesible" (técnico) de "no permitido" (límite) — razones distintas de descarte.
+- Trataste robots.txt como señal, no como autoridad única; el ToS pesó más cuando hubo conflicto.
+- `cobertura_datos` dice con precisión qué datos quedan sin cubrir y cuáles dependen de credenciales.
+- `datos_requeridos` viaja en el plan como copia literal de la ficha, para que la cobertura sea verificable.
+- Las fuentes descartadas/dudosas no contaron para la cobertura, aunque tuvieran datos_que_cubre.
+- Las fuentes delicadas llegaron al gate marcadas con su `riesgo_fuente`.
 
-Después de producir el PLAN completo, ejecutar `validar_plan.py` pasándole el PLAN generado y los `datos_requeridos` de la FICHA. El script recalcula la cobertura de forma independiente. Su propósito no es validar la forma del JSON sino verificar que la realidad del PLAN (lo que realmente cubre) coincide con lo declarado.
+## Señales de que algo va mal
 
-Si `validar_plan.py` reporta divergencia, el PLAN tiene un error que debe corregirse antes de entregar. Las causas más comunes son: `datos_que_cubre` declarando datos que la fuente no provee realmente, o cobertura total declarada como completa cuando hay datos requeridos sin fuente disponible. Corregir el PLAN, no el validador.
-
-## Formato del output
-
-El output de este skill tiene dos partes que se entregan juntas:
-
-La primera es el PLAN como JSON con un array de fuentes. Cada fuente incluye: `id`, `nombre`, `estado`, `metodo_acceso`, `datos_que_cubre` (para fuentes disponibles), `requiere_del_cliente` (para fuentes condicionales), `requiere_aclarar` (para fuentes dudosas), `riesgo`, `nota_permiso` (cuando aplica), y `motivo_descarte` (para fuentes descartadas).
-
-La segunda es un resumen en prosa de no más de cuatro párrafos que cubre: cuántas fuentes quedaron en cada estado y por qué, qué cobertura total se logra con las fuentes disponibles, qué datos quedan sin cubrir y qué camino existe para cubrirlos (fuentes condicionales pendientes de credencial, fuentes dudosas pendientes de aclaración, o genuinamente sin fuente viable identificada), y cualquier riesgo de fuente que merezca atención especial.
-
-## Errores que invalidan el PLAN
-
-Marcar `disponible` una fuente que requiere credenciales de pago sin que el cliente haya confirmado que las tiene es el error más costoso — bloquea la extracción en un punto que no da señal clara de qué falló y por qué. La regla es simple: si hay alguna credencial pendiente de confirmar, el estado es `condicional`, no `disponible`.
-
-Usar una URL como `id` es un error silencioso que produce deuda técnica garantizada. Las URLs cambian. Los ids semánticos no deberían cambiar a menos que el recurso mismo cambie de naturaleza.
-
-Omitir `requiere_del_cliente` para fuentes `condicionales` hace que el orquestador no pueda construir el prompt de recolección correcto. El resultado es una conversación con el cliente donde se le pide información vaga ("necesitamos credenciales de esta fuente") en lugar de precisa ("necesitamos tu API key de Clearbit con acceso al endpoint de enriquecimiento de empresas").
-
-Declarar cobertura total cuando hay datos requeridos sin fuente disponible es deshonestidad operacional. forge-extract asume que el PLAN es preciso. Si el PLAN dice cobertura completa y no la hay, forge-extract termina su trabajo y el dato faltante nunca se reporta como faltante — simplemente está ausente en silencio. Ser explícito sobre los datos que no tienen cobertura es la única forma de que el sistema completo se comporte de manera confiable.
+- Marcaste una fuente como disponible "porque técnicamente el scraper puede leerla", ignorando el ToS.
+- Asumiste permitida una fuente dudosa para no frenar el plan.
+- Declaraste `cobertura_datos.completa: true` contando fuentes condicionales aún sin credencial.
+- Pediste credenciales para un dato que una fuente disponible ya cubría.
+- Trataste una credencial ajena como si expandiera legítimamente el perímetro.

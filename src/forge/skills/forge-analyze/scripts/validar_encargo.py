@@ -1,276 +1,182 @@
+#!/usr/bin/env python3
 """
-Validador determinista para el ENCARGO DE FABRICACIÓN producido por forge-analyze.
+Validador determinista del encargo de fabricación de forge-analyze.
 
-Principio: verifica por recálculo — no confía en lo declarado.
+El encargo es el contrato que la FACTORY ejecuta. Razonar lo produce; este script
+garantiza que es coherente antes de emitirlo. No juzga si la decisión reusar/modificar/
+fabricar es la correcta (eso es contenido) — verifica que la estructura y las reglas
+de gobernanza se cumplan: que un skill nuevo o modificado nunca quede aprobado por
+herencia, que las cinco variables estén cuando se fabrica, que el riesgo alto escale.
 
-Validaciones principales:
-  1. Todos los registro_ids en evidencia_usada existen en el ResultadoExtraccion.
-  2. reaprobacion_requerida es true para verbos 'modificar' y 'fabricar'.
-  3. nivel_generalizacion 'universal' implica requiere_revision_humana.
-  4. especificacion_factory tiene las 5 variables requeridas.
-  5. Coherencia del encargo (no declarar datos_completos si hay faltantes).
+Uso:
+    python validar_encargo.py encargo.json
 
-Contrato:
-  validar_encargo(encargo: dict, resultado_extraccion: dict) -> dict
-    {
-      valida: bool,
-      errores: list[str],
-      advertencias: list[str],
-      requiere_revision_humana: bool
-    }
+Salida: JSON {"valida": bool, "errores": [str], "advertencias": [str]}
+Exit code 0 si válida, 1 si no.
 """
 
-from __future__ import annotations
+import json
+import sys
 
-VERBOS_VALIDOS = frozenset({"reusar", "modificar", "fabricar"})
-NIVELES_GENERALIZACION_VALIDOS = frozenset({"cliente", "vertical", "universal"})
-VARIABLES_FACTORY_REQUERIDAS = frozenset({
-    "verbo_central", "señal_disparo", "formato_salida", "complejidad", "distincion"
-})
-NIVELES_RIESGO_VALIDOS = frozenset({"bajo", "medio", "alto", "critico"})
+DECISIONES = {"reusar", "modificar", "fabricar"}
+NIVELES_RIESGO = {"bajo", "medio", "alto", "critico"}
+NIVELES_GENERALIZACION = {"cliente", "vertical", "universal"}
+CINCO_VARIABLES = {"verbo_central", "señal_disparo", "formato_salida", "complejidad", "distincion"}
 
 
-def validar_encargo(encargo: dict, resultado_extraccion: dict) -> dict:
+def _texto_no_vacio(v):
+    return isinstance(v, str) and bool(v.strip())
+
+
+def validar(encargo):
+    errores = []
+    advertencias = []
+
     if not isinstance(encargo, dict):
-        return {
-            "valida": False,
-            "errores": ["El ENCARGO debe ser un objeto JSON."],
-            "advertencias": [],
-            "requiere_revision_humana": True,
-        }
+        return {"valida": False, "errores": ["El encargo debe ser un objeto JSON."], "advertencias": []}
 
-    errores: list[str] = []
-    advertencias: list[str] = []
+    # Campos base
+    for campo in ("decision", "justificacion", "basado_en_datos_completos",
+                  "riesgo_acumulado", "reaprobacion_requerida", "requiere_revision_humana",
+                  "evidencia_usada", "nivel_generalizacion"):
+        if campo not in encargo:
+            errores.append(f"Falta el campo requerido: '{campo}'.")
+    if errores:
+        return {"valida": False, "errores": errores, "advertencias": advertencias}
 
-    # Extraer registro_ids disponibles del ResultadoExtraccion
-    registro_ids_disponibles = _extraer_registro_ids(resultado_extraccion)
+    decision = encargo["decision"]
+    if decision not in DECISIONES:
+        errores.append(f"'decision' debe ser una de {sorted(DECISIONES)}, no '{decision}'.")
 
-    _validar_decision(encargo, errores)
-    _validar_especificacion_factory(encargo, errores, advertencias)
-    _validar_evidencia_usada(encargo, errores, advertencias, registro_ids_disponibles)
-    _validar_nivel_generalizacion(encargo, errores, advertencias)
-    _validar_reaprobacion(encargo, errores)
-    _validar_coherencia_datos(encargo, errores, advertencias)
-    _validar_riesgo_acumulado(encargo, errores, advertencias)
-    _validar_skill_objetivo(encargo, errores)
+    if not _texto_no_vacio(encargo["justificacion"]):
+        errores.append("'justificacion' no puede estar vacía: debe explicar por qué ese camino.")
 
-    requiere_revision = _evaluar_revision_humana(encargo, errores)
+    skill_objetivo = encargo.get("skill_objetivo")
+    espec = encargo.get("especificacion_factory")
+    modificaciones = encargo.get("modificaciones")
 
-    return {
-        "valida": len(errores) == 0,
-        "errores": errores,
-        "advertencias": advertencias,
-        "requiere_revision_humana": requiere_revision,
-    }
+    # ── Reglas por decisión ──
+    if decision == "fabricar":
+        # Skill nuevo: no apunta a uno existente.
+        if skill_objetivo is not None:
+            errores.append("decision 'fabricar' exige skill_objetivo=null (no se basa en un skill existente).")
+        # Necesita las cinco variables.
+        _verificar_cinco_variables(espec, errores)
 
+    elif decision == "modificar":
+        # Necesita el skill a modificar y qué modificar.
+        if not _texto_no_vacio(skill_objetivo):
+            errores.append("decision 'modificar' exige 'skill_objetivo' (el skill aprobado a extender).")
+        if not isinstance(modificaciones, list) or len(modificaciones) == 0:
+            errores.append("decision 'modificar' exige 'modificaciones' (lista no vacía de ajustes).")
+        # Necesita la especificación de cómo queda tras modificar.
+        _verificar_cinco_variables(espec, errores)
 
-def _extraer_registro_ids(resultado_extraccion: dict) -> set[str]:
-    """Extrae todos los registro_ids reales del ResultadoExtraccion."""
-    if not isinstance(resultado_extraccion, dict):
-        return set()
-    registros = resultado_extraccion.get("registros", [])
-    if not isinstance(registros, list):
-        return set()
-    ids = set()
-    for r in registros:
-        if isinstance(r, dict) and r.get("registro_id"):
-            ids.add(str(r["registro_id"]))
-    return ids
+    elif decision == "reusar":
+        # Reusar no fabrica nada: no debe traer especificación de fabricación.
+        if espec not in (None, {}, ):
+            if isinstance(espec, dict) and any(espec.get(k) for k in CINCO_VARIABLES):
+                advertencias.append("decision 'reusar' no debería traer especificacion_factory con contenido (no se fabrica nada).")
+        if not _texto_no_vacio(skill_objetivo):
+            errores.append("decision 'reusar' exige 'skill_objetivo' (el skill aprobado a parametrizar).")
+        # Reusar conviene que declare con qué parámetros se invoca.
+        if "parametros" not in encargo or not isinstance(encargo.get("parametros"), dict):
+            advertencias.append("decision 'reusar' debería declarar 'parametros' (con qué se invoca el skill existente).")
 
-
-def _validar_decision(encargo: dict, errores: list) -> None:
-    decision = encargo.get("decision")
-    if decision not in VERBOS_VALIDOS:
+    # ── Gobernanza: modificar/fabricar SIEMPRE re-aprueban ──
+    reaprob = encargo["reaprobacion_requerida"]
+    if not isinstance(reaprob, bool):
+        errores.append("'reaprobacion_requerida' debe ser booleano.")
+    elif decision in {"modificar", "fabricar"} and reaprob is not True:
         errores.append(
-            f"'decision' inválida: '{decision}'. Verbos válidos: {sorted(VERBOS_VALIDOS)}."
+            f"decision '{decision}' exige reaprobacion_requerida=true: un skill nuevo o modificado nunca "
+            f"queda aprobado por herencia. Su comportamiento cambió y debe re-aprobarse."
         )
 
+    # ── Honestidad sobre datos ──
+    completos = encargo["basado_en_datos_completos"]
+    if not isinstance(completos, bool):
+        errores.append("'basado_en_datos_completos' debe ser booleano.")
+    elif completos is False:
+        faltantes = encargo.get("datos_faltantes")
+        if not isinstance(faltantes, list) or len(faltantes) == 0:
+            errores.append("Si basado_en_datos_completos=false, 'datos_faltantes' debe listar qué faltó.")
 
-def _validar_especificacion_factory(
-    encargo: dict, errores: list, advertencias: list
-) -> None:
-    ef = encargo.get("especificacion_factory")
-    if ef is None:
-        errores.append("'especificacion_factory' es requerida.")
-        return
-    if not isinstance(ef, dict):
-        errores.append("'especificacion_factory' debe ser un objeto.")
-        return
+    # ── Riesgo acumulado y escalamiento ──
+    riesgo = encargo["riesgo_acumulado"]
+    nivel = None
+    if not isinstance(riesgo, dict):
+        errores.append("'riesgo_acumulado' debe ser un objeto {nivel, fuentes_del_riesgo}.")
+    else:
+        nivel = riesgo.get("nivel")
+        if nivel not in NIVELES_RIESGO:
+            errores.append(f"riesgo_acumulado.nivel debe ser uno de {sorted(NIVELES_RIESGO)}, no '{nivel}'.")
 
-    faltantes = VARIABLES_FACTORY_REQUERIDAS - set(ef.keys())
-    if faltantes:
+    revision = encargo["requiere_revision_humana"]
+    if not isinstance(revision, bool):
+        errores.append("'requiere_revision_humana' debe ser booleano.")
+    elif nivel in {"alto", "critico"} and revision is not True:
         errores.append(
-            f"'especificacion_factory' le faltan variables requeridas: {sorted(faltantes)}."
+            f"riesgo_acumulado nivel '{nivel}' exige requiere_revision_humana=true: una capacidad de "
+            f"riesgo alto/crítico debe revisarse antes de aprobarse."
         )
 
-    # Verificar que no estén vacías
-    for var in VARIABLES_FACTORY_REQUERIDAS:
-        valor = ef.get(var)
-        if valor is not None and isinstance(valor, str) and not valor.strip():
-            advertencias.append(
-                f"'especificacion_factory.{var}' existe pero está vacía."
-            )
-
-
-def _validar_evidencia_usada(
-    encargo: dict, errores: list, advertencias: list, registro_ids_disponibles: set
-) -> None:
-    evidencia = encargo.get("evidencia_usada")
-    if evidencia is None:
-        errores.append("'evidencia_usada' es requerida — la trazabilidad causal es una invariante.")
-        return
+    # ── evidencia_usada: trazabilidad causal ──
+    evidencia = encargo["evidencia_usada"]
     if not isinstance(evidencia, list):
         errores.append("'evidencia_usada' debe ser una lista.")
-        return
-    if len(evidencia) == 0:
-        # Solo un error si el ResultadoExtraccion tenía registros
-        if registro_ids_disponibles:
-            errores.append(
-                "'evidencia_usada' está vacía pero hay registros disponibles. "
-                "Cada decisión del encargo debe tener evidencia que la sostenga."
+    else:
+        # Reusar puede no necesitar evidencia (no se fabrica nada nuevo); modificar/fabricar sí,
+        # porque están pidiendo construir capacidad y deben justificarla con datos.
+        if decision in {"modificar", "fabricar"} and len(evidencia) == 0:
+            advertencias.append(
+                "decision '" + str(decision) + "' sin evidencia_usada: la FACTORY recibe una conclusión sin "
+                "trazabilidad de qué datos la justifican. Enlaza al menos un registro."
             )
+        for i, ev in enumerate(evidencia):
+            if not isinstance(ev, dict):
+                errores.append(f"evidencia_usada[{i}] debe ser un objeto {{registro_id, fuente, razon}}.")
+                continue
+            if not _texto_no_vacio(ev.get("registro_id", "")):
+                errores.append(f"evidencia_usada[{i}] necesita 'registro_id' (enlace al registro del extractor).")
+            if not _texto_no_vacio(ev.get("razon", "")):
+                errores.append(f"evidencia_usada[{i}] necesita 'razon' (por qué ese dato justifica la spec).")
 
-    ids_citados_no_encontrados: list[str] = []
-    for i, entry in enumerate(evidencia):
-        if not isinstance(entry, dict):
-            errores.append(f"'evidencia_usada[{i}]' debe ser un objeto.")
-            continue
-
-        rid = entry.get("registro_id")
-        if not rid or not isinstance(rid, str) or not rid.strip():
-            errores.append(
-                f"'evidencia_usada[{i}]' falta 'registro_id' (debe referenciar un registro real)."
-            )
-            continue
-
-        # Verificar que el registro_id exista realmente
-        if registro_ids_disponibles and rid not in registro_ids_disponibles:
-            ids_citados_no_encontrados.append(rid)
-
-        razon = entry.get("razon")
-        if not razon or not isinstance(razon, str) or not razon.strip():
-            errores.append(
-                f"'evidencia_usada[{i}]' (registro_id='{rid}') falta 'razon' — "
-                "explicar por qué ese registro motivó esta decisión."
-            )
-
-    if ids_citados_no_encontrados:
+    # ── nivel_generalizacion: alcance y rigor ──
+    nivel_gen = encargo["nivel_generalizacion"]
+    if nivel_gen not in NIVELES_GENERALIZACION:
+        errores.append(f"'nivel_generalizacion' debe ser uno de {sorted(NIVELES_GENERALIZACION)}, no '{nivel_gen}'.")
+    elif nivel_gen == "universal" and decision in {"modificar", "fabricar"} and revision is not True:
+        # Un skill universal tiene radio de impacto = todo el ecosistema. Aunque el riesgo
+        # operativo parezca bajo, su alcance exige revisión humana antes de aprobar.
         errores.append(
-            f"evidencia_usada cita registro_ids que no existen en el ResultadoExtraccion: "
-            f"{ids_citados_no_encontrados}. Revisar la cadena de trazabilidad."
+            "nivel_generalizacion 'universal' al fabricar/modificar exige requiere_revision_humana=true: "
+            "un skill universal impacta todo el ecosistema, su aprobación no puede ser automática."
         )
 
+    return {"valida": len(errores) == 0, "errores": errores, "advertencias": advertencias}
 
-def _validar_nivel_generalizacion(
-    encargo: dict, errores: list, advertencias: list
-) -> None:
-    nivel = encargo.get("nivel_generalizacion")
-    if nivel not in NIVELES_GENERALIZACION_VALIDOS:
-        errores.append(
-            f"'nivel_generalizacion' inválido: '{nivel}'. "
-            f"Válidos: {sorted(NIVELES_GENERALIZACION_VALIDOS)}."
-        )
+
+def _verificar_cinco_variables(espec, errores):
+    if not isinstance(espec, dict):
+        errores.append("especificacion_factory debe ser un objeto con las cinco variables de la FACTORY.")
         return
-
-    if nivel == "universal" and not encargo.get("requiere_revision_humana"):
-        errores.append(
-            "'nivel_generalizacion: universal' requiere 'requiere_revision_humana: true' — "
-            "un skill universal afecta a todas las organizaciones."
-        )
+    for v in sorted(CINCO_VARIABLES):
+        if not _texto_no_vacio(espec.get(v, "")):
+            errores.append(f"especificacion_factory.{v} es necesaria para que la FACTORY fabrique bien.")
 
 
-def _validar_reaprobacion(encargo: dict, errores: list) -> None:
-    decision = encargo.get("decision")
-    reaprobacion = encargo.get("reaprobacion_requerida")
-
-    if decision in ("modificar", "fabricar"):
-        if reaprobacion is not True:
-            errores.append(
-                f"'reaprobacion_requerida' debe ser true cuando decision='{decision}'. "
-                "Modificar o fabricar un skill siempre requiere nueva aprobación."
-            )
-
-    if decision == "reusar" and reaprobacion is True:
-        # Advertencia, no error — puede ser intencional
-        pass  # El validador no objeta si el LLM quiso ser más conservador
+def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"valida": False, "errores": ["Uso: python validar_encargo.py encargo.json"],
+                          "advertencias": []}, ensure_ascii=False))
+        sys.exit(1)
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        encargo = json.load(fh)
+    resultado = validar(encargo)
+    print(json.dumps(resultado, ensure_ascii=False, indent=2))
+    sys.exit(0 if resultado["valida"] else 1)
 
 
-def _validar_coherencia_datos(
-    encargo: dict, errores: list, advertencias: list
-) -> None:
-    completo = encargo.get("basado_en_datos_completos")
-    faltantes = encargo.get("datos_faltantes", [])
-
-    if completo is None:
-        errores.append("'basado_en_datos_completos' (bool) es requerido.")
-        return
-
-    if not isinstance(completo, bool):
-        errores.append("'basado_en_datos_completos' debe ser booleano.")
-        return
-
-    if not isinstance(faltantes, list):
-        errores.append("'datos_faltantes' debe ser una lista.")
-        return
-
-    if completo is True and len(faltantes) > 0:
-        errores.append(
-            "'basado_en_datos_completos' es true pero 'datos_faltantes' no está vacío. "
-            "Coherencia interna inválida."
-        )
-
-    if completo is False and len(faltantes) == 0:
-        advertencias.append(
-            "'basado_en_datos_completos' es false pero 'datos_faltantes' está vacío — "
-            "declarar qué datos concretos faltan."
-        )
-
-
-def _validar_riesgo_acumulado(
-    encargo: dict, errores: list, advertencias: list
-) -> None:
-    ra = encargo.get("riesgo_acumulado")
-    if ra is None:
-        errores.append("'riesgo_acumulado' es requerido.")
-        return
-    if not isinstance(ra, dict):
-        errores.append("'riesgo_acumulado' debe ser un objeto con campo 'nivel'.")
-        return
-
-    nivel = ra.get("nivel")
-    if nivel not in NIVELES_RIESGO_VALIDOS:
-        errores.append(
-            f"'riesgo_acumulado.nivel' inválido: '{nivel}'. "
-            f"Válidos: {sorted(NIVELES_RIESGO_VALIDOS)}."
-        )
-
-
-def _validar_skill_objetivo(encargo: dict, errores: list) -> None:
-    so = encargo.get("skill_objetivo")
-    if so is None:
-        errores.append("'skill_objetivo' (nombre del skill a construir o reusar) es requerido.")
-        return
-    if not isinstance(so, str) or not so.strip():
-        errores.append("'skill_objetivo' debe ser una cadena no vacía en kebab-case.")
-
-
-def _evaluar_revision_humana(encargo: dict, errores: list) -> bool:
-    if errores:
-        return True
-
-    if encargo.get("requiere_revision_humana") is True:
-        return True
-
-    decision = encargo.get("decision")
-    if decision in ("modificar", "fabricar"):
-        return True
-
-    nivel_gen = encargo.get("nivel_generalizacion")
-    if nivel_gen == "universal":
-        return True
-
-    ra = encargo.get("riesgo_acumulado") or {}
-    if ra.get("nivel") in ("alto", "critico"):
-        return True
-
-    return False
+if __name__ == "__main__":
+    main()

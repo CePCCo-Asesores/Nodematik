@@ -1,211 +1,149 @@
+#!/usr/bin/env python3
 """
-Tipos y contratos para el estado del lazo continuo forge-loop.
+Contrato del estado del lazo de operación continua (forge-loop).
 
-El EstadoLazo es el estado en reposo del operador vivo.
-El scheduler lo despierta en ráfagas; entre ejecuciones no hay proceso activo.
+Concepto central: un pipeline continuo NO está corriendo todo el tiempo — existe como
+ESTADO EN REPOSO y corre en ráfagas cuando un trigger lo despierta. Este módulo define
+qué es ese estado y la interfaz de almacenamiento que lo persiste.
 
-AlmacenEstado define la interfaz que el backend implementa sobre Postgres.
-REQUISITO CRÍTICO: todo acceso de escritura al estado de un lazo activo
-debe usar SELECT … FOR UPDATE SKIP LOCKED para evitar ráfagas concurrentes.
-
-AlmacenMemoria es una implementación en memoria para tests y diseño.
+El estado vive fuera del proceso (en el backend: Postgres/Redis) para que cualquier
+worker pueda reanimar el lazo donde quedó, aunque el proceso que lo corría haya muerto.
+Aquí el almacenamiento es una interfaz abstracta: la implementación en memoria sirve
+para probar en diseño; la implementación de backend se enchufa después sin cambiar la
+lógica del lazo.
 """
 
 from __future__ import annotations
-
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional, Protocol, runtime_checkable
-
-
-# ───────────────────────────────────────────────
-# Tipos auxiliares
-# ───────────────────────────────────────────────
-
-@dataclass
-class Ritmo:
-    """
-    Define la cadencia de ejecución del lazo.
-
-    tipo='cron': el lazo corre según una expresión cron (ej: "0 9 * * 1" = lunes 9h).
-    tipo='umbral': el lazo corre cuando la métrica cruza el valor (ej: "precio > 1000").
-    """
-    tipo: str              # 'cron' | 'umbral'
-    valor: str = ""        # expresión cron (si tipo='cron')
-    metrica: str = ""      # nombre de la métrica a monitorear (si tipo='umbral')
-    operador: str = ""     # '>' | '<' | '>=' | '<=' | '==' (si tipo='umbral')
-    valor_umbral: float = 0.0  # valor numérico del umbral (si tipo='umbral')
-
-    def __post_init__(self) -> None:
-        if self.tipo not in ("cron", "umbral"):
-            raise ValueError(f"Ritmo.tipo debe ser 'cron' o 'umbral', got: '{self.tipo}'")
-        if self.tipo == "cron" and not self.valor.strip():
-            raise ValueError("Ritmo cron requiere 'valor' (expresión cron).")
-        if self.tipo == "umbral" and not self.metrica.strip():
-            raise ValueError("Ritmo umbral requiere 'metrica'.")
+from dataclasses import dataclass, field, asdict
+from typing import Any, Protocol
+import json
 
 
-@dataclass
-class SkillOperante:
-    """El skill que está resolviendo activamente el problema del lazo."""
-    name: str              # kebab-case
-    version: int
-    approved_at: str       # ISO 8601 — cuando fue aprobado
-
-
-@dataclass
-class PoliticaAdaptacion:
-    """
-    Controla cuándo y cuántas veces el lazo puede adaptar su skill_operante.
-
-    adaptar_si: condición textual que describe cuándo iniciar adaptación.
-    no_adaptar_si: condición textual que frena la adaptación.
-    max_adaptaciones_por_periodo: techo anti-hiperactividad.
-    periodo_horas: ventana del techo en horas.
-    extraccion_vacia_es_fallo: si False, extracción vacía no cuenta como fallo
-      (útil para monitoreo de ausencia — "avisar cuando NO haya eventos").
-    """
-    adaptar_si: str
-    no_adaptar_si: str
-    max_adaptaciones_por_periodo: int = 3
-    periodo_horas: int = 24
-    extraccion_vacia_es_fallo: bool = True
-
-
-@dataclass
-class Huella:
-    """Snapshot del resultado de la última ejecución exitosa."""
-    contenido_hash: str    # hash del contenido concatenado de los registros
-    cobertura_pct: float   # cobertura de datos_requeridos en esa ejecución
-    fuentes_activas: list[str]  # ids de fuentes que aportaron registros
-
-
-@dataclass
-class EntradaHistorial:
-    """Una entrada en el historial de eventos del lazo."""
-    ts: str                # ISO 8601
-    evento: str            # 'ejecucion_ok' | 'fallo' | 'adaptacion_iniciada' | 'pausa' | etc.
-    detalle: str = ""
-
-
-# ───────────────────────────────────────────────
-# Estado principal
-# ───────────────────────────────────────────────
+# ─── El estado en reposo de un lazo ───────────────────────────────────────────
+#
+# Esto es lo que persiste entre ráfagas. Un worker que despierta lee este estado,
+# corre la tubería, y escribe el estado actualizado. Si el worker muere a media
+# ráfaga, el estado anterior sigue intacto y otro worker lo retoma.
 
 @dataclass
 class EstadoLazo:
-    """
-    Estado completo y persistente de un lazo continuo.
+    loop_id: str                          # identificador único de este lazo
+    ficha_id: str                         # la ficha (problema) que este lazo opera
+    org_id: str                           # tenant — aislamiento multi-cliente
+    ritmo: dict[str, Any]                 # cómo se dispara (ver nota de ritmo abajo)
+    estado_operativo: str                 # "activo" | "pausado" | "adaptando" | "detenido"
 
-    Este objeto se serializa/deserializa desde Postgres (modelo LoopState).
-    Los campos Json del modelo corresponden a los tipos anidados aquí.
-    """
-    loop_id: str
-    ficha_id: str
-    org_id: str
-    ritmo: Ritmo
-    skill_operante: SkillOperante
-    politica_adaptacion: PoliticaAdaptacion
-
-    estado_operativo: str = "activo"   # 'activo'|'pausado'|'adaptando'|'detenido'
-    ultima_ejecucion: Optional[datetime] = None
-    proxima_ejecucion: Optional[datetime] = None
+    # Memoria entre ráfagas
+    ultima_ejecucion: str | None = None   # timestamp ISO de la última ráfaga
+    proxima_ejecucion: str | None = None  # cuándo debe despertar la próxima
     ejecuciones_totales: int = 0
-    huella_anterior: Optional[Huella] = None
-    fallos_consecutivos: int = 0
-    ultima_anomalia: Optional[dict] = None
-    pendiente_aprobacion: bool = False
-    cooldown_adaptacion_hasta: Optional[datetime] = None
-    adaptaciones_en_periodo: dict = field(default_factory=lambda: {"periodo_inicio": "", "count": 0})
-    historial: list[EntradaHistorial] = field(default_factory=list)
+    huella_anterior: str | None = None    # hash/resumen de la última extracción, para comparar
+    # Qué capacidad opera esta solución. Objeto, no string: en un lazo vivo la VERSIÓN
+    # importa — si el skill se modificó y re-aprobó, el lazo debe saber con cuál opera.
+    skill_operante: dict[str, Any] | None = None  # {"name", "version", "approved_at"}
 
-    def __post_init__(self) -> None:
-        estados_validos = {"activo", "pausado", "adaptando", "detenido"}
-        if self.estado_operativo not in estados_validos:
-            raise ValueError(
-                f"estado_operativo '{self.estado_operativo}' inválido. "
-                f"Válidos: {sorted(estados_validos)}."
-            )
+    # Salud y adaptación
+    fallos_consecutivos: int = 0          # ráfagas seguidas que fallaron
+    ultima_anomalia: dict[str, Any] | None = None  # qué cambió que disparó vigilancia
+    pendiente_aprobacion: bool = False    # true si una adaptación espera el gate
+
+    # Control de adaptación: evita loops hiperactivos que despiertan la FACTORY demasiado.
+    politica_adaptacion: dict[str, Any] = field(default_factory=lambda: {
+        "adaptar_si": ["fuente_muerta", "umbral_cruzado", "cobertura_cayo"],
+        "no_adaptar_si": ["cambio_normal_de_datos"],
+        "max_adaptaciones_por_periodo": 3,
+        "periodo_horas": 24,
+        # ¿Cero datos sin error cuenta como fallo? Default true: la mayoría de los lazos
+        # esperan datos. Un lazo que monitorea AUSENCIA de eventos (p.ej. "avísame si
+        # aparece una anomalía") lo pone en false: cero registros es su resultado normal,
+        # no un fallo. Nota: una excepción real siempre es fallo, sin importar esta política.
+        "extraccion_vacia_es_fallo": True,
+    })
+    cooldown_adaptacion_hasta: str | None = None   # no adaptar antes de este timestamp
+    adaptaciones_en_periodo: list[str] = field(default_factory=list)  # timestamps de adaptaciones recientes
+
+    # Auditoría
+    historial: list[dict[str, Any]] = field(default_factory=list)  # bitácora de ráfagas (acotada)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict[str, Any]) -> "EstadoLazo":
+        return EstadoLazo(**d)
 
 
-# ───────────────────────────────────────────────
-# Interfaz del almacén (para el backend)
-# ───────────────────────────────────────────────
+ESTADOS_OPERATIVOS = {"activo", "pausado", "adaptando", "detenido"}
+MAX_HISTORIAL = 50  # la bitácora se acota para no crecer sin límite
 
-@runtime_checkable
+# El ritmo es un objeto estructurado, no un string, para que sea evaluable por código
+# sin parsear texto. Dos formas:
+#   temporal: {"tipo": "cron", "valor": "cada_hora" | "diario" | "semanal"}
+#   umbral:   {"tipo": "umbral", "metrica": "...", "operador": ">" | "<" | ">=" | "<=", "valor": <num>}
+TIPOS_RITMO = {"cron", "umbral"}
+VALORES_CRON = {"cada_hora", "diario", "semanal"}
+OPERADORES_UMBRAL = {">", "<", ">=", "<=", "=="}
+
+
+def ritmo_es_temporal(ritmo: dict) -> bool:
+    return isinstance(ritmo, dict) and ritmo.get("tipo") == "cron"
+
+
+def ritmo_es_umbral(ritmo: dict) -> bool:
+    return isinstance(ritmo, dict) and ritmo.get("tipo") == "umbral"
+
+
+# ─── La interfaz de almacenamiento ────────────────────────────────────────────
+#
+# La lógica del lazo depende de esta forma, no de una base de datos concreta.
+# En diseño se usa la implementación en memoria; en producción, una que escribe a
+# Postgres/Redis — sin cambiar la lógica. Es el mismo principio orquestador/adaptador
+# que ya usamos: el núcleo es universal, el almacén es enchufable.
+
 class AlmacenEstado(Protocol):
-    """
-    Interfaz que el backend TypeScript implementa sobre Postgres.
+    def leer(self, loop_id: str) -> EstadoLazo | None: ...
+    def escribir(self, estado: EstadoLazo) -> None: ...
+    def listar_pendientes(self, ahora_iso: str) -> list[EstadoLazo]:
+        """Lazos cuya proxima_ejecucion ya pasó y están 'activo' — listos para despertar.
 
-    REQUISITO DE CONCURRENCIA:
-    cargar_con_lock() debe implementarse con:
-      SELECT * FROM loop_states WHERE loop_id = $1 FOR UPDATE SKIP LOCKED
-
-    Si el registro está bloqueado por otra instancia, devolver None.
-    Esto garantiza que solo una ráfaga procese el mismo lazo a la vez.
-    Sin el lock, dos instancias del scheduler podrían ejecutar el mismo
-    lazo simultáneamente, corrompiendo el estado.
-    """
-
-    def cargar_con_lock(self, loop_id: str) -> Optional[EstadoLazo]:
-        """
-        Carga el estado del lazo con lock exclusivo.
-        Devuelve None si el registro está bloqueado o no existe.
-        La transacción debe permanecer abierta hasta guardar_y_liberar().
+        REQUISITO DE CONCURRENCIA para la implementación de backend: dos workers no deben
+        correr el mismo lazo a la vez. La implementación sobre Postgres debe tomar un lock
+        por loop_id al entregar cada lazo pendiente (p.ej. SELECT ... FOR UPDATE SKIP LOCKED),
+        de modo que un lazo ya tomado por un worker no se entregue a otro en el mismo tick.
+        En memoria (pruebas) no aplica, pero el contrato lo exige en producción.
         """
         ...
+    def eliminar(self, loop_id: str) -> None: ...
 
-    def guardar_y_liberar(self, estado: EstadoLazo) -> None:
-        """
-        Persiste el estado actualizado y libera el lock.
-        Debe llamarse siempre que cargar_con_lock() devolvió un estado.
-        """
-        ...
-
-    def listar_pendientes(self) -> list[str]:
-        """
-        Lista los loop_ids de lazos activos cuya proxima_ejecucion ya pasó.
-        Consulta: WHERE estado_operativo='activo' AND proxima_ejecucion <= NOW()
-        Usa el índice (estado_operativo, proxima_ejecucion).
-        """
-        ...
-
-
-# ───────────────────────────────────────────────
-# Implementación en memoria (solo para tests)
-# ───────────────────────────────────────────────
 
 class AlmacenMemoria:
-    """
-    Implementación en memoria del AlmacenEstado para tests y diseño.
-    No simula concurrencia — sirve para tests unitarios del motor.
-    """
+    """Implementación en memoria para diseño y pruebas. El backend la reemplaza."""
+    def __init__(self):
+        self._datos: dict[str, dict[str, Any]] = {}
 
-    def __init__(self) -> None:
-        self._estados: dict[str, EstadoLazo] = {}
-        self._bloqueados: set[str] = set()
+    def leer(self, loop_id: str) -> EstadoLazo | None:
+        d = self._datos.get(loop_id)
+        return EstadoLazo.from_dict(json.loads(json.dumps(d))) if d else None
 
-    def agregar(self, estado: EstadoLazo) -> None:
-        self._estados[estado.loop_id] = estado
+    def escribir(self, estado: EstadoLazo) -> None:
+        self._datos[estado.loop_id] = estado.to_dict()
 
-    def cargar_con_lock(self, loop_id: str) -> Optional[EstadoLazo]:
-        if loop_id in self._bloqueados:
-            return None
-        estado = self._estados.get(loop_id)
-        if estado is not None:
-            self._bloqueados.add(loop_id)
-        return estado
+    def listar_pendientes(self, ahora_iso: str) -> list[EstadoLazo]:
+        from datetime import datetime
+        def _parse(s):
+            try:
+                return datetime.fromisoformat(s) if s else None
+            except (ValueError, TypeError):
+                return None
+        ahora = _parse(ahora_iso)
+        pendientes = []
+        for d in self._datos.values():
+            if d.get("estado_operativo") == "activo" and d.get("proxima_ejecucion"):
+                prox = _parse(d["proxima_ejecucion"])
+                # Comparar datetimes parseados, no strings (robusto ante formatos heterogéneos).
+                if prox is not None and ahora is not None and prox <= ahora:
+                    pendientes.append(EstadoLazo.from_dict(json.loads(json.dumps(d))))
+        return pendientes
 
-    def guardar_y_liberar(self, estado: EstadoLazo) -> None:
-        self._estados[estado.loop_id] = estado
-        self._bloqueados.discard(estado.loop_id)
-
-    def listar_pendientes(self) -> list[str]:
-        ahora = datetime.now(timezone.utc)
-        return [
-            e.loop_id
-            for e in self._estados.values()
-            if e.estado_operativo == "activo"
-            and e.proxima_ejecucion is not None
-            and e.proxima_ejecucion <= ahora
-        ]
+    def eliminar(self, loop_id: str) -> None:
+        self._datos.pop(loop_id, None)
