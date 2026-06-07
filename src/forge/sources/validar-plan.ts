@@ -21,6 +21,19 @@ export interface ResultadoValidacionPlan {
 const ESTADOS_VALIDOS = new Set(['disponible', 'condicional', 'descartada', 'dudosa'])
 const METODOS_ACCESO_VALIDOS = new Set(['api', 'feed', 'web', 'archivo_cliente', 'dataset_abierto'])
 
+// Qué clave de 'metadatos' necesita cada metodo_acceso para que el extractor sepa de
+// dónde obtener los datos. Re-portado del diseño Python de validar_plan: una fuente
+// usable sin estos metadatos es inútil para forge-extract (sabe que es usable pero no
+// de dónde extraer). feed/web → url; api → endpoint; archivo_cliente → ruta;
+// dataset_abierto → url.
+const METADATO_REQUERIDO_POR_METODO: Record<string, string> = {
+  feed: 'url',
+  web: 'url',
+  api: 'endpoint',
+  archivo_cliente: 'ruta',
+  dataset_abierto: 'url',
+}
+
 // ─── Función principal ────────────────────────────────────────────────────────
 
 export function validarPlan(plan: unknown, datosRequeridos: unknown): ResultadoValidacionPlan {
@@ -197,6 +210,25 @@ function validarFuente(
     }
     if ((metodo === undefined || metodo === null) && estado === 'disponible') {
       errores.push(`fuentes['${label}'] con estado 'disponible' requiere metodo_acceso.`)
+    }
+
+    // Una fuente usable debe traer en 'metadatos' el dato de acceso que su metodo necesita
+    // (url/endpoint/ruta), o el extractor no sabrá de dónde extraer. Solo se exige cuando
+    // el metodo es válido y conocido.
+    if (typeof metodo === 'string' && METADATO_REQUERIDO_POR_METODO[metodo]) {
+      const claveReq = METADATO_REQUERIDO_POR_METODO[metodo]
+      const metadatos = f['metadatos']
+      const metaObj =
+        metadatos && typeof metadatos === 'object' && !Array.isArray(metadatos)
+          ? (metadatos as Record<string, unknown>)
+          : null
+      const valor = metaObj ? metaObj[claveReq] : undefined
+      if (!valor || typeof valor !== 'string' || !(valor as string).trim()) {
+        errores.push(
+          `fuentes['${label}'] (metodo '${metodo}') requiere 'metadatos.${claveReq}' ` +
+          'para que el extractor sepa de dónde obtener los datos.'
+        )
+      }
     }
   }
 
