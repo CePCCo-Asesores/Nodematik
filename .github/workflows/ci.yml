@@ -11,6 +11,42 @@ jobs:
     name: Lint · Test · Build
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: nodematik
+          POSTGRES_PASSWORD: nodematik
+          POSTGRES_DB: nodematik_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://nodematik:nodematik@localhost:5432/nodematik_test
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-jwt-secret-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      ADMIN_API_KEY: ci-admin-key
+      NODE_ENV: test
+      ENCRYPTION_KEYS: '{"0":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
+      ENCRYPTION_CURRENT_KID: "0"
+      FIELD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      META_VERIFY_TOKEN: ci-verify-token
+
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +61,10 @@ jobs:
       - name: Type check
         run: npm run lint
 
-      - name: Unit tests
+      - name: Run migrations
+        run: npx prisma migrate deploy
+
+      - name: Unit + integration tests
         run: npm test
 
       - name: Production build

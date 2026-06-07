@@ -1,7 +1,7 @@
 {
   "name": "nodematik",
   "version": "0.1.0",
-  "description": "Multi-bot WhatsApp chatbot platform — multi-tenant, LLM-agnostic, BYO credentials",
+  "description": "Nodematik — Operador autónomo de soluciones. Convierte un problema en lenguaje natural en una capacidad operada: intake → sources → extract → analyze → factory → gate → loop.",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsup",
