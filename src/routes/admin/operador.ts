@@ -131,6 +131,72 @@ const operadorRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(loop)
   })
 
+  // ── POST /operador/solicitudes/:id/aprobaciones ──────────────────────────
+  // Gate para skills fabricados en solicitudes únicas (eje_temporal == "unico").
+  // Las solicitudes continuas tienen loop propio — usar /loops/:loopId/aprobaciones.
+  fastify.post<{
+    Params: { id: string }
+    Body: { aprobado: boolean }
+  }>('/solicitudes/:id/aprobaciones', async (req, reply) => {
+    const { id } = req.params
+    const { aprobado } = req.body
+    const user = req.user!
+
+    if (typeof aprobado !== 'boolean') {
+      return reply.status(400).send({ error: "'aprobado' (boolean) es requerido." })
+    }
+
+    const solicitud = await db.solicitud.findUnique({
+      where: { id },
+      select: { orgId: true, skillId: true, loopId: true, estado: true },
+    })
+
+    if (!solicitud) return reply.status(404).send({ error: 'Solicitud no encontrada.' })
+    if (!user.isSuperadmin && solicitud.orgId !== user.orgId) {
+      return reply.status(403).send({ error: 'Forbidden' })
+    }
+    if (!solicitud.skillId) {
+      return reply.status(409).send({ error: 'La solicitud no tiene skill fabricado pendiente de aprobación.' })
+    }
+    if (solicitud.loopId) {
+      return reply.status(409).send({
+        error: 'Esta solicitud tiene un lazo activo. Usa POST /admin/operador/loops/:loopId/aprobaciones.',
+      })
+    }
+
+    const skill = await db.skill.findUnique({
+      where: { id: solicitud.skillId },
+      select: { forgeApproved: true },
+    })
+
+    if (!skill) return reply.status(404).send({ error: 'Skill no encontrado.' })
+    if (skill.forgeApproved) return reply.status(409).send({ error: 'El skill ya está aprobado.' })
+
+    if (!aprobado) {
+      await db.solicitud.update({
+        where: { id },
+        data: { estado: 'rechazado' },
+      })
+      return reply.send({ ok: true, accion: 'rechazado' })
+    }
+
+    await db.skill.update({
+      where: { id: solicitud.skillId },
+      data: {
+        forgeApproved: true,
+        approvedAt: new Date(),
+        approvedBy: user.isSuperadmin ? 'superadmin' : user.userId,
+      },
+    })
+
+    await db.solicitud.update({
+      where: { id },
+      data: { estado: 'aprobado' },
+    })
+
+    return reply.send({ ok: true, accion: 'aprobado', skillId: solicitud.skillId })
+  })
+
   // ── POST /operador/loops/:loopId/aprobaciones ─────────────────────────────
   fastify.post<{
     Params: { loopId: string }

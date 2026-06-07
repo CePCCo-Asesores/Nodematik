@@ -16,6 +16,7 @@ import { logger } from '../logger'
 import { procesarSolicitud } from '../services/operador.service'
 import { ejecutarRafaga, tickScheduler } from '../forge/loop/motor'
 import { AlmacenEstadoPrisma } from '../forge/loop/almacen-prisma'
+import { bootstrapForge } from '../forge/bootstrap'
 
 // ─── Queue ────────────────────────────────────────────────────────────────────
 
@@ -58,6 +59,10 @@ export async function encolarSolicitud(solicitudId: string): Promise<void> {
 // ─── Iniciar worker + scheduler repeatable ────────────────────────────────────
 
 export function startForgeWorker(): Worker {
+  // Registrar adaptadores de extracción y conectar tubería del lazo.
+  // Debe ejecutarse antes de procesar cualquier job.
+  bootstrapForge()
+
   const redis = getPubClient()
   const almacen = new AlmacenEstadoPrisma(redis)
 

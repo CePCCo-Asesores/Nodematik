@@ -148,6 +148,7 @@ export async function procesarSolicitud(solicitudId: string): Promise<void> {
     const decision = encargoObj['decision'] as string | undefined
 
     let skillId: string | undefined
+    let skillVersion: number | undefined
 
     // ── Paso E (condicional): FACTORY — ENCARGO → SKILL.md ────────────────────
     if (decision === 'fabricar' || decision === 'modificar') {
@@ -160,6 +161,7 @@ export async function procesarSolicitud(solicitudId: string): Promise<void> {
         apiKey,
       })
       skillId = resultado.skillId
+      skillVersion = resultado.version
       await db.solicitud.update({ where: { id: solicitudId }, data: { skillId } })
     } else if (decision === 'reusar') {
       // Buscar el skill existente
@@ -168,10 +170,11 @@ export async function procesarSolicitud(solicitudId: string): Promise<void> {
         const skillExistente = await db.skill.findFirst({
           where: { orgId: solicitud.orgId, name: skillName, forgeApproved: true },
           orderBy: { version: 'desc' },
-          select: { id: true },
+          select: { id: true, version: true },
         })
         if (skillExistente) {
           skillId = skillExistente.id
+          skillVersion = skillExistente.version
           await db.solicitud.update({ where: { id: solicitudId }, data: { skillId } })
         }
       }
@@ -187,6 +190,7 @@ export async function procesarSolicitud(solicitudId: string): Promise<void> {
         orgId: solicitud.orgId,
         solicitudId,
         skillId,
+        skillVersion,
       })
       await db.solicitud.update({ where: { id: solicitudId }, data: { loopId } })
     }
@@ -229,10 +233,11 @@ interface EntradaLoopState {
   orgId: string
   solicitudId: string
   skillId: string | undefined
+  skillVersion: number | undefined
 }
 
 async function configurarLazo(entrada: EntradaLoopState): Promise<string> {
-  const { fichaObj, encargoObj, orgId, solicitudId, skillId } = entrada
+  const { fichaObj, encargoObj, orgId, solicitudId, skillId, skillVersion } = entrada
 
   const ejeTemporal = (fichaObj['eje_temporal'] as Record<string, unknown>) ?? {}
   const ritmoStr = String(ejeTemporal['ritmo'] ?? 'diario').toLowerCase()
@@ -258,7 +263,7 @@ async function configurarLazo(entrada: EntradaLoopState): Promise<string> {
       ejecucionesTotales: 0,
       skillOperante: {
         name: skillName,
-        version: 1,
+        version: skillVersion ?? 1,
         approvedAt: ahora.toISOString(),
       } as object,
       fallosConsecutivos: 0,
