@@ -85,8 +85,9 @@ Lo que es infraestructura compartida = código (repo). Lo que es contenido gener
 |----------|----------|
 | `POST /admin/operador/solicitudes` | Entra un problema en lenguaje natural y dispara la tubería |
 | `GET /admin/operador/solicitudes/:id` | Estado de una solución |
+| `POST /admin/operador/solicitudes/:id/aprobaciones` | Gate humano para solicitudes únicas: aprueba/rechaza el skill fabricado |
 | `GET /admin/operador/loops/:loopId` | Estado de un lazo continuo |
-| `POST /admin/operador/loops/:loopId/aprobaciones` | Gate humano: aprueba/rechaza una capacidad o adaptación |
+| `POST /admin/operador/loops/:loopId/aprobaciones` | Gate humano para lazos continuos: aprueba/rechaza una capacidad o adaptación |
 
 ## Requisitos
 
@@ -113,7 +114,7 @@ Ver `.env.example` para la lista completa. Las mínimas para arrancar:
 |----------|-------------|
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
-| `FIELD_ENCRYPTION_KEY` | Clave AES-256-GCM para cifrar credenciales (ver abajo) |
+| `FIELD_ENCRYPTION_KEY` | Clave AES-256-GCM activa (base64, 32 bytes). Requerida. En rotación multi-key usa `ENCRYPTION_KEYS` y `ENCRYPTION_CURRENT_KID` (ver abajo) |
 | `META_APP_SECRET` | App Secret de Meta para verificar webhooks de WhatsApp |
 | `WEBHOOK_VERIFY_TOKEN` | Token de verificación del webhook |
 | `JWT_SECRET` | Secreto para firmar tokens JWT |
@@ -170,33 +171,52 @@ npm test
 
 Cubre la plataforma base (auth, safety, quota, knowledge, aislamiento multi-tenant, resiliencia, crisis) y el operador FORGE (validadores de intake/sources/analyze y el motor del lazo). Los tests de FORGE viven en `tests/forge-*.test.ts`.
 
-## FIELD_ENCRYPTION_KEY — Gestión de la clave maestra
+## Cifrado y rotación de claves
 
-Esta clave cifra **todas** las credenciales por cliente (API keys de LLM, credenciales de canal, integraciones). Si se pierde, los datos cifrados son irrecuperables.
+Todas las credenciales por cliente (API keys de LLM, credenciales de canal, Sentry DSN, integraciones) se cifran con AES-256-GCM. El sistema soporta múltiples claves activas simultáneamente (multi-key), lo que permite rotar sin downtime.
 
-### Generar
+### Generar una clave
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-### Backup
+Guardar en un gestor de secretos (Railway Variables, AWS Secrets Manager, Vault) **antes** de usarla en producción. Nunca en el repositorio.
 
-Guardar en un gestor de secretos (Railway Variables, AWS Secrets Manager, Vault, Bitwarden) **antes** de usarla en producción. Nunca en el repositorio.
+### Variables de entorno de cifrado
 
-### Rotación de clave
+| Variable | Descripción |
+|----------|-------------|
+| `FIELD_ENCRYPTION_KEY` | Clave base (base64, 32 bytes). Requerida. Se registra como kid=0. |
+| `ENCRYPTION_KEYS` | JSON multi-key para rotación: `{"0":"<base64>","1":"<base64>"}`. Opcional — extiende `FIELD_ENCRYPTION_KEY`. |
+| `ENCRYPTION_CURRENT_KID` | KID de la clave activa para nuevos cifrados. Default `0`. Cambiar a `1` activa la nueva clave. |
 
-La clave no admite rotación sin re-cifrar todos los registros:
+El formato de blob cifrado es `MAGIC(2) + KID(1) + IV(12) + TAG(16) + CIPHERTEXT`. Blobs legacy (sin MAGIC) se descifran con kid=0 automáticamente.
+
+### Rotación de clave (sin downtime)
 
 ```bash
-# 1. Exportar todos los valores cifrados con la clave antigua
-# 2. Descifrarlos con la clave antigua
-# 3. Generar nueva FIELD_ENCRYPTION_KEY
-# 4. Re-cifrarlos con la nueva clave y actualizar la DB
-# 5. Rotar la variable de entorno en todos los servicios simultáneamente
+# 1. Generar nueva clave
+NEW_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64'))")
+
+# 2. Agregar la nueva clave como kid=1 — NO cambiar ENCRYPTION_CURRENT_KID todavía.
+#    El sistema puede descifrar con kid=0 y kid=1 al mismo tiempo.
+ENCRYPTION_KEYS='{"0":"<clave-actual>","1":"<nueva-clave>"}'
+
+# 3. Re-cifrar registros existentes con la nueva clave (corre en background, safe para producción)
+POST /admin/crypto/reencrypt   # header: x-admin-key
+
+# 4. Verificar que el endpoint completó sin errores.
+
+# 5. Activar la nueva clave para nuevos cifrados
+ENCRYPTION_CURRENT_KID=1
+
+# 6. Retirar la clave antigua cuando ya no haya blobs con kid=0
+#    (consultar logs — el sistema emite warnings al descifrar con kid retirado)
 ```
 
-Una rotación mal ejecutada (cambiar la env var sin re-cifrar primero) deja todos los clientes con error de credenciales. Hacer el re-cifrado en una transacción antes de cambiar la clave en producción.
+**Cobertura de `/admin/crypto/reencrypt`**: re-cifra bots, channels, integrations y Sentry DSNs.
+**No cubre**: `Message.bodyEnc` — requiere backfill async paginado separado (tarea pendiente P2).
 
 ## Seguridad
 

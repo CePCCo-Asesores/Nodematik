@@ -256,9 +256,12 @@ function validarSkillDestinoSugerido(d: Record<string, unknown>, errores: string
   }
 
   const s = sd as Record<string, unknown>
+  // nombre puede ser null cuando ningún skill aplica y el fallback es factory/humano.
   const nombre = s['nombre']
-  if (!nombre || typeof nombre !== 'string' || !(nombre as string).trim()) {
-    errores.push("'skill_destino_sugerido.nombre' es requerido.")
+  if (nombre !== null && nombre !== undefined) {
+    if (typeof nombre !== 'string' || !(nombre as string).trim()) {
+      errores.push("'skill_destino_sugerido.nombre' debe ser una cadena no vacía si se proporciona (o null).")
+    }
   }
 
   const razon = s['razon']

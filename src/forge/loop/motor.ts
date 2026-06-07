@@ -203,7 +203,8 @@ function calcularHuella(resultado: Record<string, unknown>): Huella {
   const contenidoConcat = contenidos.join('\n---\n')
   const contenidoHash = createHash('sha256').update(contenidoConcat, 'utf8').digest('hex').slice(0, 16)
 
-  const cobertura = Number(resultado['cobertura_pct'] ?? 0)
+  // El orquestador devuelve coberturaPct (camelCase); aceptar snake_case por retrocompatibilidad.
+  const cobertura = Number(resultado['coberturaPct'] ?? resultado['cobertura_pct'] ?? 0)
   const fuentes = [...new Set(
     registros.map(r => String(r['fuente'] ?? '')).filter(Boolean)
   )].sort()

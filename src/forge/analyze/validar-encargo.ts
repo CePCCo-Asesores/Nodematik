@@ -64,7 +64,7 @@ function extraerRegistroIds(resultadoExtraccion: unknown): Set<string> {
   const ids = new Set<string>()
   for (const r of registros as unknown[]) {
     if (r && typeof r === 'object' && !Array.isArray(r)) {
-      const rid = (r as Record<string, unknown>)['registro_id']
+      const rid = (r as Record<string, unknown>)['registroId']
       if (rid) ids.add(String(rid))
     }
   }
