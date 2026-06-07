@@ -5,6 +5,11 @@ forge_vertical: universal
 forge_autonomy: semi
 forge_output_format: text
 forge_approved: false
+forge_version: 1.0
+forge_pipeline_steps: 1
+forge_command: /forge forge-loop
+forge_author: ""
+forge_created: ""
 forge_capabilities:
   agentic: true
   multimodal: false
@@ -24,9 +29,25 @@ forge_runtime:
     language: python
     purpose: motor del lazo (scheduling, vigilancia por huella, decisión de adaptación) y validación del estado
 forge_mcp_servers:
-  database.postgresql: required
-  scheduling: required
-  code_execution.python: required
+  required:
+    - server: mcp_database
+      resource: database.postgresql
+      reason: "Persiste el estado en reposo de cada lazo entre ráfagas. Sin BD no hay continuidad — el lazo no puede sobrevivir entre invocaciones."
+    - server: mcp_scheduler
+      resource: scheduling
+      reason: "Despierta cada lazo en el momento de su ritmo. Sin scheduler no hay ráfagas — el operador vivo deja de existir."
+    - server: mcp_code
+      resource: code_execution.python
+      reason: "Ejecuta motor_lazo.py y validar_estado.py — lógica de vigilancia, detección de deterioro y validación de estado corren como código."
+  degradable: []
+  optional: []
+mcp_compatibility:
+  engine_version_minimum: "3.1"
+  tested_servers:
+    - mcp_database
+    - mcp_scheduler
+    - mcp_code
+  known_incompatibilities: []
 proactive:
   triggers:
     - type: cron

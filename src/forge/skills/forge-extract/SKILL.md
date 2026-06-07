@@ -5,6 +5,11 @@ forge_vertical: universal
 forge_autonomy: semi
 forge_output_format: text
 forge_approved: false
+forge_version: 1.0
+forge_pipeline_steps: 1
+forge_command: /forge forge-extract
+forge_author: ""
+forge_created: ""
 forge_capabilities:
   agentic: true
   multimodal: false
@@ -21,8 +26,17 @@ forge_runtime:
       type: rest
       auth: api_key
 forge_mcp_servers:
-  code_execution.python: required
-  external_apis: degradable
+  required:
+    - server: mcp_code
+      resource: code_execution.python
+      reason: "Ejecuta orquestador.py y todos los adaptadores — descarga, parseo, normalización y validación corren como código Python. Sin esto no hay extracción."
+  degradable: []
+  optional: []
+mcp_compatibility:
+  engine_version_minimum: "3.1"
+  tested_servers:
+    - mcp_code
+  known_incompatibilities: []
 agentic:
   can_run_unattended: true
   unattended_requiere: plan aprobado por forge-sources y cruce del gate según riesgo

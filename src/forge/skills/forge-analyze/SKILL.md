@@ -6,6 +6,11 @@ forge_vertical: universal
 forge_autonomy: semi
 forge_output_format: text
 forge_approved: false
+forge_version: 1.0
+forge_pipeline_steps: 1
+forge_command: /forge forge-analyze
+forge_author: ""
+forge_created: ""
 forge_capabilities:
   agentic: true
   multimodal: false
@@ -18,7 +23,17 @@ forge_runtime:
     language: python
     purpose: validación determinista de la coherencia del encargo de fabricación antes de emitirlo
 forge_mcp_servers:
-  code_execution.python: required
+  required:
+    - server: mcp_code
+      resource: code_execution.python
+      reason: "Ejecuta validar_encargo.py — sin validación determinista el encargo puede salir incoherente y la FACTORY fabricaría sobre especificación malformada."
+  degradable: []
+  optional: []
+mcp_compatibility:
+  engine_version_minimum: "3.1"
+  tested_servers:
+    - mcp_code
+  known_incompatibilities: []
 agentic:
   can_run_unattended: false
   next_pipeline: factory
