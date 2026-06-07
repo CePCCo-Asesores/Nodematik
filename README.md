@@ -85,8 +85,9 @@ Lo que es infraestructura compartida = código (repo). Lo que es contenido gener
 |----------|----------|
 | `POST /admin/operador/solicitudes` | Entra un problema en lenguaje natural y dispara la tubería |
 | `GET /admin/operador/solicitudes/:id` | Estado de una solución |
+| `POST /admin/operador/solicitudes/:id/aprobaciones` | Gate humano para solicitudes únicas: aprueba/rechaza el skill fabricado |
 | `GET /admin/operador/loops/:loopId` | Estado de un lazo continuo |
-| `POST /admin/operador/loops/:loopId/aprobaciones` | Gate humano: aprueba/rechaza una capacidad o adaptación |
+| `POST /admin/operador/loops/:loopId/aprobaciones` | Gate humano para lazos continuos: aprueba/rechaza una capacidad o adaptación |
 
 ## Requisitos
 
