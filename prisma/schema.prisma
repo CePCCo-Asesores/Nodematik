@@ -21,6 +21,7 @@ model Organization {
   bots       Bot[]
   skills     Skill[]
   loopStates LoopState[]
+  solicitudes Solicitud[]
 
   @@map("organizations")
 }
@@ -69,6 +70,7 @@ model Bot {
   endUsers       EndUser[]
   messages       Message[]
   crisisEvents   CrisisEvent[]
+  solicitudes    Solicitud[]
 
   @@map("bots")
 }
@@ -286,6 +288,32 @@ model Skill {
   @@unique([orgId, name, version])
   @@index([orgId])
   @@map("skills")
+}
+
+// Solicitud de operación Forge.
+// Registra el ciclo de vida de una petición: problema NL → pipeline → skill/loop.
+model Solicitud {
+  id             String   @id @default(uuid())
+  orgId          String   @map("org_id")
+  botId          String   @map("bot_id")
+  problema       String
+  estado         String   @default("pendiente") // 'pendiente'|'procesando'|'completado'|'error'
+  fichaJson      Json?    @map("ficha_json")
+  planJson       Json?    @map("plan_json")
+  extraccionJson Json?    @map("extraccion_json")
+  encargoJson    Json?    @map("encargo_json")
+  skillId        String?  @map("skill_id")
+  loopId         String?  @map("loop_id")
+  errorDetalle   String?  @map("error_detalle")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  org Organization @relation(fields: [orgId], references: [id])
+  bot Bot          @relation(fields: [botId], references: [id])
+
+  @@index([orgId, createdAt])
+  @@index([estado])
+  @@map("solicitudes")
 }
 
 // Estado persistente del lazo continuo forge-loop.

@@ -1,6 +1,7 @@
 import { config } from './config';
 import { initSentry, Sentry } from './lib/sentry';
 import { startWorker } from './queue/consumer';
+import { startForgeWorker, registrarSchedulerRepeatable } from './queue/forge-scheduler';
 import { db } from './db';
 import { logger } from './logger';
 import { getSubClient, closePubSub, CACHE_INVALIDATE_CHANNEL } from './lib/pubsub';
@@ -25,6 +26,12 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const worker = startWorker();
+const forgeWorker = startForgeWorker();
+
+// Registrar el job repeatable del scheduler forge (idempotente — safe correr múltiples veces)
+registrarSchedulerRepeatable().catch((err) => {
+  logger.error({ err: (err as Error).message }, 'error al registrar forge scheduler');
+});
 
 // Subscribe to cache invalidation events broadcast by the web service
 const sub = getSubClient();
@@ -50,6 +57,7 @@ async function shutdown() {
   forceExit.unref(); // don't block event loop if everything closes cleanly
 
   await worker.close();
+  await forgeWorker.close();
   await closePubSub();
   await db.$disconnect();
   clearTimeout(forceExit);
