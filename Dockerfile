@@ -13,5 +13,6 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY prisma ./prisma
 COPY src/forge/skills ./src/forge/skills
+COPY start.sh ./start.sh
 EXPOSE 3000
 CMD ["node", "dist/server.js"]
