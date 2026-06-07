@@ -17,8 +17,10 @@ model Organization {
   sentryDsnEnc       Bytes?   @map("sentry_dsn_enc") // AES-256-GCM encrypted; null = tenant Sentry disabled
   createdAt          DateTime @default(now()) @map("created_at")
 
-  orgUsers OrgUser[]
-  bots     Bot[]
+  orgUsers   OrgUser[]
+  bots       Bot[]
+  skills     Skill[]
+  loopStates LoopState[]
 
   @@map("organizations")
 }
@@ -258,4 +260,63 @@ model AuditLog {
   @@index([orgId, createdAt])
   @@index([actorId, createdAt])
   @@map("audit_logs")
+}
+
+// Skills generados por cliente vía FACTORY.
+// Los skills base (forge-intake, forge-sources, etc.) viven en el repo (src/forge/skills/),
+// no en esta tabla. Esta tabla es solo para contenido generado que pertenece a una org.
+model Skill {
+  id                    String    @id @default(uuid())
+  orgId                 String    @map("org_id")
+  name                  String    // kebab-case; único dentro de la org por versión
+  version               Int       @default(1)
+  content               String    // SKILL.md completo (el prompt que carga el LLM)
+  validators            Json?     // refs a validadores asociados: [{name, script}]
+  verboCentral          String    @map("verbo_central") // 'reusar' | 'modificar' | 'fabricar'
+  nivelGeneralizacion   String    @default("cliente") @map("nivel_generalizacion") // 'cliente' | 'vertical' | 'universal'
+  forgeApproved         Boolean   @default(false) @map("forge_approved")
+  requiereRevisionHumana Boolean  @default(false) @map("requiere_revision_humana")
+  approvedAt            DateTime? @map("approved_at")
+  approvedBy            String?   @map("approved_by") // OrgUser.id del aprobador
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, name, version])
+  @@index([orgId])
+  @@map("skills")
+}
+
+// Estado persistente del lazo continuo forge-loop.
+// Un lazo es un estado en reposo que el scheduler despierta en ráfagas.
+// El acceso a un registro debe usar SELECT … FOR UPDATE SKIP LOCKED para
+// evitar ejecuciones concurrentes del mismo lazo.
+model LoopState {
+  loopId                  String    @id @map("loop_id") // asignado por la aplicación
+  fichaId                 String    @map("ficha_id")    // id de la ficha forge-intake de origen
+  orgId                   String    @map("org_id")
+  ritmo                   Json      // {tipo:'cron'|'umbral', valor?:string, metrica?:string, operador?:string, valor_umbral?:number}
+  estadoOperativo         String    @default("activo") @map("estado_operativo") // 'activo'|'pausado'|'adaptando'|'detenido'
+  ultimaEjecucion         DateTime? @map("ultima_ejecucion")
+  proximaEjecucion        DateTime? @map("proxima_ejecucion") // indexado: el scheduler filtra aquí
+  ejecucionesTotales      Int       @default(0) @map("ejecuciones_totales")
+  huellaAnterior          Json?     @map("huella_anterior")       // {contenido_hash, cobertura_pct, fuentes_activas}
+  skillOperante           Json      @map("skill_operante")         // {name:string, version:number, approved_at:string}
+  fallosConsecutivos      Int       @default(0) @map("fallos_consecutivos")
+  ultimaAnomalia          Json?     @map("ultima_anomalia")        // {tipo, detalle, ts}
+  pendienteAprobacion     Boolean   @default(false) @map("pendiente_aprobacion")
+  politicaAdaptacion      Json      @map("politica_adaptacion")   // {adaptar_si, no_adaptar_si, max_adaptaciones_por_periodo, periodo_horas, extraccion_vacia_es_fallo}
+  cooldownAdaptacionHasta DateTime? @map("cooldown_adaptacion_hasta")
+  adaptacionesEnPeriodo   Json      @default("{}") @map("adaptaciones_en_periodo") // {periodo_inicio:string, count:number}
+  historial               Json      @default("[]") // [{ts, evento, detalle}]
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  // Índice clave para el scheduler: lista lazos activos cuya próxima ejecución ya pasó
+  @@index([estadoOperativo, proximaEjecucion])
+  @@index([orgId])
+  @@map("loop_states")
 }

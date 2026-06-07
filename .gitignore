@@ -8,3 +8,6 @@ prisma/generated/
 *.log
 coverage/
 .nyc_output/
+__pycache__/
+*.pyc
+*.pyo
