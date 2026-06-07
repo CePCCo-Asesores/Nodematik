@@ -40,12 +40,14 @@ jobs:
       DATABASE_URL: postgresql://nodematik:nodematik@localhost:5432/nodematik_test
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci-jwt-secret-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-      ADMIN_API_KEY: ci-admin-key
+      ADMIN_API_KEY: ci-admin-api-key-32-chars-xxxxxxxxxxxx
       NODE_ENV: test
       ENCRYPTION_KEYS: '{"0":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
       ENCRYPTION_CURRENT_KID: "0"
       FIELD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-      META_VERIFY_TOKEN: ci-verify-token
+      WEBHOOK_VERIFY_TOKEN: ci-verify-token
+      META_APP_SECRET: ci-meta-app-secret
+      PHONE_HASH_SECRET: ci-phone-hash-secret-32-chars-xxxxxxxxxx
 
     steps:
       - uses: actions/checkout@v4
@@ -69,3 +71,11 @@ jobs:
 
       - name: Production build
         run: npm run build
+
+      - name: Startup smoke test
+        run: |
+          node dist/server.js &
+          SERVER_PID=$!
+          sleep 4
+          curl --fail --retry 3 --retry-delay 1 http://localhost:3000/health
+          kill $SERVER_PID
