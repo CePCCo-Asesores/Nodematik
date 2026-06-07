@@ -14,8 +14,8 @@ const schema = z.object({
   // Minimum 32 chars to prevent weak key attacks
   ADMIN_API_KEY: z.string().min(32),
   JWT_SECRET: z.string().min(32),
-  JWT_ISSUER: z.string().default('chatbox-api'),
-  JWT_AUDIENCE: z.string().default('chatbox-clients'),
+  JWT_ISSUER: z.string().default('nodematik-api'),
+  JWT_AUDIENCE: z.string().default('nodematik-clients'),
   META_APP_ID: z.string().optional(), // required only for Embedded Signup
   POLICY_VERSION: z.string().default('1.0'),
   PORT: z.coerce.number().default(3000),

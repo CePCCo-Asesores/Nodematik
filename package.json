@@ -1,5 +1,5 @@
 {
-  "name": "chatbox",
+  "name": "nodematik",
   "version": "0.1.0",
   "description": "Multi-bot WhatsApp chatbot platform — multi-tenant, LLM-agnostic, BYO credentials",
   "main": "dist/server.js",

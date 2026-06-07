@@ -76,14 +76,16 @@ export class SafetyClassifier {
     if (!platformKey) return keywordResult;
 
     try {
-      return await this.classifyWithLLM(text, platformKey);
+      return await this.classifyWithLLM(text, platformKey, safetyLevel);
     } catch {
-      // Classifier error: fail open (keyword result) rather than blocking all messages
+      // strict: fallo cerrado — bloquear antes que dejar pasar en modo de máxima protección
+      if (safetyLevel === 'strict') return { isCrisis: true, category: 'classifier_unavailable' };
+      // standard: fallo abierto — el resultado de keywords es mejor que bloquear todo
       return keywordResult;
     }
   }
 
-  private async classifyWithLLM(text: string, apiKey: string): Promise<ClassificationResult> {
+  private async classifyWithLLM(text: string, apiKey: string, safetyLevel: SafetyLevel): Promise<ClassificationResult> {
     if (!this.llmClient || this.llmClientKey !== apiKey) {
       this.llmClient = new Anthropic({ apiKey });
       this.llmClientKey = apiKey;
@@ -101,7 +103,8 @@ export class SafetyClassifier {
       const parsed = JSON.parse(raw) as { isCrisis: boolean; category?: string | null };
       return { isCrisis: Boolean(parsed.isCrisis), category: parsed.category ?? undefined };
     } catch {
-      return { isCrisis: false }; // fail open — malformed LLM JSON is not a crisis
+      if (safetyLevel === 'strict') return { isCrisis: true, category: 'classifier_unavailable' };
+      return { isCrisis: false }; // fail open — JSON malformado no es crisis en modo estándar
     }
   }
 

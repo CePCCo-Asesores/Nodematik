@@ -125,6 +125,9 @@ model BotKnowledge {
   tags          String[]
   embeddingData Bytes?   @map("embedding_data") // Float32Array — cosine similarity, no pgvector needed
   hasEmbedding  Boolean  @default(false) @map("has_embedding")
+  // Nota: la columna `embedding_vec vector(1536)` existe en la BD vía migración SQL raw
+  // (ver prisma/migrations/) porque Prisma no soporta el tipo pgvector nativamente.
+  // Se accede con $queryRaw / $executeRaw. No está aquí para evitar errores de generación.
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
 

@@ -2,7 +2,7 @@ import { Registry, Counter, Histogram, Gauge, collectDefaultMetrics } from 'prom
 
 // Isolated registry — avoids polluting the global default registry in tests
 export const registry = new Registry();
-registry.setDefaultLabels({ service: 'chatbox' });
+registry.setDefaultLabels({ service: 'nodematik' });
 
 // Collect Node.js runtime metrics (heap, GC, event loop lag, etc.)
 if (process.env.NODE_ENV !== 'test') {
@@ -12,7 +12,7 @@ if (process.env.NODE_ENV !== 'test') {
 // ─── LLM ─────────────────────────────────────────────────────────────────────
 
 export const llmDurationMs = new Histogram({
-  name: 'chatbox_llm_request_duration_ms',
+  name: 'nodematik_llm_request_duration_ms',
   help: 'LLM API call latency in milliseconds',
   labelNames: ['provider', 'model'] as const,
   buckets: [100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000],
@@ -20,28 +20,28 @@ export const llmDurationMs = new Histogram({
 });
 
 export const llmInputTokens = new Counter({
-  name: 'chatbox_llm_input_tokens_total',
+  name: 'nodematik_llm_input_tokens_total',
   help: 'Total input tokens consumed across all LLM calls',
   labelNames: ['provider', 'model'] as const,
   registers: [registry],
 });
 
 export const llmOutputTokens = new Counter({
-  name: 'chatbox_llm_output_tokens_total',
+  name: 'nodematik_llm_output_tokens_total',
   help: 'Total output tokens generated across all LLM calls',
   labelNames: ['provider', 'model'] as const,
   registers: [registry],
 });
 
 export const llmCostUsd = new Counter({
-  name: 'chatbox_llm_estimated_cost_usd_total',
+  name: 'nodematik_llm_estimated_cost_usd_total',
   help: 'Estimated LLM spend in USD based on public per-token pricing',
   labelNames: ['provider', 'model'] as const,
   registers: [registry],
 });
 
 export const llmErrors = new Counter({
-  name: 'chatbox_llm_errors_total',
+  name: 'nodematik_llm_errors_total',
   help: 'LLM API errors by provider and error type',
   labelNames: ['provider', 'error_type'] as const,
   registers: [registry],
@@ -50,7 +50,7 @@ export const llmErrors = new Counter({
 // ─── Meta / WhatsApp ─────────────────────────────────────────────────────────
 
 export const metaApiErrors = new Counter({
-  name: 'chatbox_meta_api_errors_total',
+  name: 'nodematik_meta_api_errors_total',
   help: 'Meta (WhatsApp Cloud API) errors by HTTP status code',
   labelNames: ['status_code'] as const,
   registers: [registry],
@@ -59,7 +59,7 @@ export const metaApiErrors = new Counter({
 // ─── Queue ───────────────────────────────────────────────────────────────────
 
 export const dlqDepth = new Gauge({
-  name: 'chatbox_dlq_depth',
+  name: 'nodematik_dlq_depth',
   help: 'Current number of jobs waiting in the dead-letter queue',
   registers: [registry],
 });
@@ -67,20 +67,20 @@ export const dlqDepth = new Gauge({
 // ─── Business ────────────────────────────────────────────────────────────────
 
 export const quotaBlocks = new Counter({
-  name: 'chatbox_quota_blocks_total',
+  name: 'nodematik_quota_blocks_total',
   help: 'Inbound messages rejected because the org monthly quota was exceeded',
   registers: [registry],
 });
 
 export const safetyBlocks = new Counter({
-  name: 'chatbox_safety_blocks_total',
+  name: 'nodematik_safety_blocks_total',
   help: 'Messages intercepted by the safety classifier',
   labelNames: ['action_taken'] as const,
   registers: [registry],
 });
 
 export const messagesProcessed = new Counter({
-  name: 'chatbox_messages_processed_total',
+  name: 'nodematik_messages_processed_total',
   help: 'Total inbound messages fully processed (past all gates)',
   registers: [registry],
 });

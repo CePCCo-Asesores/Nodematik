@@ -1,12 +1,12 @@
 export const openApiSpec = {
   openapi: '3.0.3',
   info: {
-    title: 'Chatbox API',
+    title: 'Nodematik API',
     version: '1.0.0',
     description:
       'Multi-tenant WhatsApp chatbot platform — multi-tenant, LLM-agnostic, BYO credentials. ' +
       'All bot LLM API keys are encrypted at rest (AES-256-GCM) and never logged.',
-    contact: { email: 'support@chatbox.app' },
+    contact: { email: 'support@nodematik.app' },
   },
   servers: [{ url: '/api/v1', description: 'Current environment' }],
   components: {
