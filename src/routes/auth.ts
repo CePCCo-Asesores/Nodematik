@@ -14,17 +14,22 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
     const passwordHash = await hashPassword(body.password);
 
-    // Wrap org + user creation in a transaction — partial failure leaves no orphaned org
-    const { org, user } = await db.$transaction(async (tx) => {
+    // Wrap org + user + bot creation in a transaction — partial failure leaves no orphaned data.
+    // Cada organización nace con un bot universal (su "asistente") sin credenciales LLM;
+    // el cliente lo configura con su propia API key (modelo BYO) antes de operar soluciones.
+    const { org, user, bot } = await db.$transaction(async (tx) => {
       const org = await tx.organization.create({ data: { name: body.orgName } });
       const user = await tx.orgUser.create({
         data: { orgId: org.id, email, passwordHash, role: 'owner' },
       });
-      return { org, user };
+      const bot = await tx.bot.create({
+        data: { orgId: org.id, name: `Asistente de ${body.orgName}`, status: 'draft' },
+      });
+      return { org, user, bot };
     });
 
     const token = signToken({ sub: user.id, orgId: org.id, role: 'owner' });
-    return reply.status(201).send({ token, orgId: org.id, userId: user.id });
+    return reply.status(201).send({ token, orgId: org.id, userId: user.id, botId: bot.id, llmConfigured: false });
   });
 
   // Login — 10 attempts per 15 minutes per IP
@@ -38,8 +43,18 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     const valid = await verifyPassword(body.password, user.passwordHash);
     if (!valid) return reply.status(401).send({ error: 'Invalid credentials' });
 
+    // Bot universal de la organización. Si por alguna razón no existe (cuentas previas
+    // al cambio), se crea al vuelo para que ninguna org quede sin su asistente.
+    let bot = await db.bot.findFirst({ where: { orgId: user.orgId }, orderBy: { createdAt: 'asc' } });
+    if (!bot) {
+      const org = await db.organization.findUnique({ where: { id: user.orgId } });
+      bot = await db.bot.create({
+        data: { orgId: user.orgId, name: `Asistente de ${org?.name ?? 'mi organización'}`, status: 'draft' },
+      });
+    }
+
     const token = signToken({ sub: user.id, orgId: user.orgId, role: user.role });
-    return reply.send({ token, orgId: user.orgId, userId: user.id, role: user.role, expiresIn: '7d' });
+    return reply.send({ token, orgId: user.orgId, userId: user.id, role: user.role, botId: bot.id, llmConfigured: !!bot.llmApiKeyEnc, expiresIn: '7d' });
   });
 };
 
