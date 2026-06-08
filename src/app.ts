@@ -44,7 +44,19 @@ export function buildApp() {
   });
 
   fastify.register(helmet);
-  fastify.register(cors, { origin: false }); // Webhook + admin API — no browser CORS needed
+  // CORS: permite que el frontend (demo en nodematik.com, app en Vercel) llame a la API
+  // desde el navegador. Los webhooks de Meta no usan navegador, así que no se ven afectados.
+  fastify.register(cors, {
+    origin: [
+      'https://nodematik.com',
+      'https://www.nodematik.com',
+      /\.vercel\.app$/,           // previews y producción en Vercel
+      /^http:\/\/localhost:\d+$/, // desarrollo local
+    ],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  });
 
   // OpenAPI spec (static mode — spec is maintained in src/openapi.ts)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
