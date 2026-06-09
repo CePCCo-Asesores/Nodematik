@@ -300,7 +300,7 @@ model Solicitud {
   orgId          String   @map("org_id")
   botId          String   @map("bot_id")
   problema       String
-  estado         String   @default("pendiente") // 'pendiente'|'procesando'|'completado'|'error'
+  estado         String   @default("pendiente") // 'pendiente'|'esperando_respuesta'|'procesando'|'completado'|'error'
   fichaJson      Json?    @map("ficha_json")
   planJson       Json?    @map("plan_json")
   extraccionJson Json?    @map("extraccion_json")
@@ -308,6 +308,7 @@ model Solicitud {
   skillId        String?  @map("skill_id")
   loopId         String?  @map("loop_id")
   errorDetalle   String?  @map("error_detalle")
+  conversacion   Json     @default("[]") @map("conversacion")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 

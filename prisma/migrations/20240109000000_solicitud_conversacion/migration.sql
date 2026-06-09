@@ -1,0 +1,1 @@
+ALTER TABLE "solicitudes" ADD COLUMN IF NOT EXISTS "conversacion" JSONB NOT NULL DEFAULT '[]';
