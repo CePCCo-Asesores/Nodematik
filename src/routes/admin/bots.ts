@@ -5,6 +5,7 @@ import { encrypt } from '../../crypto';
 import { invalidateBotCache } from '../../services/bot.service';
 import { requirePermission, can } from '../../lib/rbac';
 import { logAudit } from '../../services/audit.service';
+import { processWebChatMessage } from '../../services/conversation.service';
 import {
   parseBody,
   CreateBotSchema, UpdateBotSchema, PromptSchema,
@@ -96,7 +97,13 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
     if (body.historyWindow !== undefined) data.historyWindow = body.historyWindow;
     if (body.llmProvider !== undefined) data.llmProvider = body.llmProvider;
     if (body.llmModel !== undefined) data.llmModel = body.llmModel;
-    if (body.llmApiKey !== undefined) data.llmApiKeyEnc = encrypt(body.llmApiKey);
+    if (body.llmApiKey !== undefined) {
+      try {
+        data.llmApiKeyEnc = encrypt(body.llmApiKey);
+      } catch {
+        return reply.status(400).send({ error: 'No se pudo guardar la API key. Verifica que sea válida.' });
+      }
+    }
     if (body.llmParams !== undefined) data.llmParams = body.llmParams;
     if (body.status !== undefined) data.status = body.status;
     if (body.safetyLevel !== undefined) data.safetyLevel = body.safetyLevel;
@@ -260,6 +267,48 @@ const botRoutes: FastifyPluginAsync = async (fastify) => {
     invalidateBotCache(req.params.id);
     return reply.send({ count: created.count });
   });
+
+  // ── Chat B — web chat session ─────────────────────────────────────────────
+  // POST /admin/bots/:botId/chat
+  // Org isolation for :botId is handled by the parent hook in admin/index.ts.
+  fastify.post<{ Params: { botId: string }; Body: { mensaje: string; conversationId?: string } }>(
+    '/:botId/chat',
+    async (req, reply) => {
+      const { botId } = req.params;
+      const { mensaje, conversationId } = (req.body ?? {}) as { mensaje?: string; conversationId?: string };
+
+      if (!mensaje || typeof mensaje !== 'string' || !mensaje.trim()) {
+        return reply.status(400).send({ error: "'mensaje' es requerido." });
+      }
+
+      const user = req.user!;
+
+      // Verify bot belongs to org (superadmin bypasses)
+      const bot = await db.bot.findUnique({ where: { id: botId }, select: { orgId: true, llmApiKeyEnc: true } });
+      if (!bot) return reply.status(404).send({ error: 'Bot no encontrado.' });
+      if (!user.isSuperadmin && bot.orgId !== user.orgId) {
+        return reply.status(403).send({ error: 'Forbidden' });
+      }
+      if (!bot.llmApiKeyEnc) {
+        return reply.status(400).send({ error: 'Configura las credenciales LLM primero.' });
+      }
+
+      try {
+        const result = await processWebChatMessage({
+          botId,
+          orgId: user.isSuperadmin ? bot.orgId : user.orgId,
+          userId: user.userId,
+          mensaje: mensaje.trim(),
+          conversationId: conversationId ?? undefined,
+        });
+        return reply.send(result);
+      } catch (err) {
+        const e = err as Error & { statusCode?: number };
+        if (e.statusCode === 400) return reply.status(400).send({ error: e.message });
+        throw err;
+      }
+    },
+  );
 };
 
 // ─── Sanitize: never return encrypted bytes to the API ───────────────────────

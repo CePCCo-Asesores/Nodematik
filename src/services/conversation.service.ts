@@ -444,3 +444,119 @@ async function handleLLMError(
   captureTenantException(orgId, error, { botId, botName, errorType: 'llm_error' });
   throw err;
 }
+
+// ─── Web Chat (admin panel / Chat B) ─────────────────────────────────────────
+
+export interface WebChatParams {
+  botId: string;
+  orgId: string;
+  userId: string;
+  mensaje: string;
+  conversationId?: string;
+}
+
+export interface WebChatResult {
+  respuesta: string;
+  conversationId: string;
+}
+
+export async function processWebChatMessage(params: WebChatParams): Promise<WebChatResult> {
+  const { botId, userId, mensaje } = params;
+  const { randomUUID } = await import('crypto');
+  const conversationId = params.conversationId ?? randomUUID();
+
+  // Load bot with required fields
+  const bot = await db.bot.findUnique({
+    where: { id: botId },
+    include: { branding: true, crisisConfig: true },
+  });
+  if (!bot) throw Object.assign(new Error('Bot not found'), { statusCode: 404 });
+  if (!bot.llmProvider || !bot.llmModel || !bot.llmApiKeyEnc) {
+    throw Object.assign(new Error('Configura las credenciales LLM primero'), { statusCode: 400 });
+  }
+
+  // Safety check on input
+  const inputSafety = await safetyClassifier.classifyAsync(mensaje, bot.safetyLevel as SafetyLevel);
+  if (inputSafety.isCrisis) {
+    return { respuesta: buildCrisisMessage(bot.crisisConfig), conversationId };
+  }
+
+  // Build history from stored messages for this conversationId
+  const historyMessages = await db.message.findMany({
+    where: { botId, externalId: { startsWith: `webchat:${conversationId}:` } },
+    orderBy: { createdAt: 'asc' },
+    take: (bot.historyWindow ?? 5) * 2,
+  });
+  const history: LLMMessage[] = historyMessages.map(m => ({
+    role: m.direction === 'in' ? ('user' as const) : ('assistant' as const),
+    content: decrypt(m.bodyEnc),
+  }));
+
+  // LLM call
+  const llmProvider = getLLMProvider(bot.llmProvider);
+  const apiKey = decrypt(bot.llmApiKeyEnc);
+  const systemPrompt = buildSystemPrompt(bot.systemPrompt ?? '', '', bot.branding);
+
+  let responseText: string;
+  try {
+    const result = await llmProvider.complete({
+      systemPrompt,
+      history,
+      userMessage: mensaje,
+      params: (bot.llmParams as Record<string, unknown> | null) ?? undefined,
+      apiKey,
+      model: bot.llmModel,
+    });
+    responseText = result.text;
+  } catch (err) {
+    if (err instanceof LLMCredentialError) {
+      await db.bot.update({ where: { id: botId }, data: { status: 'credential_error' } });
+      invalidateBotCache(botId);
+    }
+    throw err;
+  }
+
+  // Safety check on output
+  const outputSafety = await safetyClassifier.classifyAsync(responseText, bot.safetyLevel as SafetyLevel);
+  if (outputSafety.isCrisis) {
+    responseText = buildCrisisMessage(bot.crisisConfig);
+  }
+
+  // Persist messages, using endUser keyed by userId
+  const endUserId = await ensureWebChatEndUser(botId, userId);
+  const msgCount = historyMessages.length;
+  await db.message.create({
+    data: {
+      botId,
+      endUserId,
+      direction: 'in',
+      inputType: 'text',
+      bodyEnc: encrypt(mensaje),
+      externalId: `webchat:${conversationId}:${msgCount}`,
+    },
+  });
+  await db.message.create({
+    data: {
+      botId,
+      endUserId,
+      direction: 'out',
+      inputType: 'text',
+      bodyEnc: encrypt(responseText),
+      externalId: `webchat:${conversationId}:${msgCount + 1}`,
+    },
+  });
+
+  return { respuesta: responseText, conversationId };
+}
+
+// Lazily upsert a synthetic EndUser record for web chat sessions (keyed by userId hash)
+async function ensureWebChatEndUser(botId: string, userId: string): Promise<string> {
+  const hash = createHash('sha256').update(`webchat:${userId}`).digest('hex');
+  const endUser = await db.endUser.upsert({
+    where: { botId_waPhoneHash: { botId, waPhoneHash: hash } },
+    create: { botId, waPhoneHash: hash },
+    update: {},
+    select: { id: true },
+  });
+  return endUser.id;
+}
