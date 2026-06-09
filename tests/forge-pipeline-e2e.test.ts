@@ -182,8 +182,8 @@ describe('pipeline FORGE completo — solicitud única', () => {
 
     await procesarSolicitud('sol-001')
 
-    // Estado final
-    expect(solicitudState['estado']).toBe('completado')
+    // Estado final: nuevo skill fabricado para solución única → espera aprobación humana
+    expect(solicitudState['estado']).toBe('esperando_aprobacion')
 
     // Cada etapa persistida
     expect(solicitudState['fichaJson']).toBeDefined()
