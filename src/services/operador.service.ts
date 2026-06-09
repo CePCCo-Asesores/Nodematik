@@ -182,7 +182,10 @@ export async function procesarSolicitud(solicitudId: string): Promise<void> {
 
     // ── Paso F (condicional): forge-loop — configurar lazo continuo ────────────
     const ejeTemporal = (fichaObj['eje_temporal'] as Record<string, unknown> | undefined) ?? {}
-    if (ejeTemporal['tipo'] === 'continuo') {
+    const isContinuo = ejeTemporal['tipo'] === 'continuo'
+    const fabricoNuevo = decision === 'fabricar' || decision === 'modificar'
+
+    if (isContinuo) {
       logger.info({ solicitudId }, 'forge-loop: configurando lazo continuo')
       const loopId = await configurarLazo({
         fichaObj,
@@ -193,9 +196,12 @@ export async function procesarSolicitud(solicitudId: string): Promise<void> {
         skillVersion,
       })
       await db.solicitud.update({ where: { id: solicitudId }, data: { loopId } })
+      await db.solicitud.update({ where: { id: solicitudId }, data: { estado: 'completado' } })
+    } else if (fabricoNuevo && skillId) {
+      await db.solicitud.update({ where: { id: solicitudId }, data: { estado: 'esperando_aprobacion' } })
+    } else {
+      await db.solicitud.update({ where: { id: solicitudId }, data: { estado: 'completado' } })
     }
-
-    await db.solicitud.update({ where: { id: solicitudId }, data: { estado: 'completado' } })
     logger.info({ solicitudId }, 'solicitud completada')
 
   } catch (err) {
