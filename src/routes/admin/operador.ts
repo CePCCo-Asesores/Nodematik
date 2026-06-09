@@ -26,6 +26,29 @@ type MensajeConversacion = { rol: 'usuario' | 'operador'; mensaje: string; times
 
 const operadorRoutes: FastifyPluginAsync = async (fastify) => {
 
+  // ── GET /operador/solicitudes ─────────────────────────────────────────────
+  fastify.get('/solicitudes', async (req, reply) => {
+    const user = req.user!
+    const where = user.isSuperadmin ? {} : { orgId: user.orgId }
+    const solicitudes = await db.solicitud.findMany({
+      where,
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true,
+        orgId: true,
+        botId: true,
+        problema: true,
+        estado: true,
+        skillId: true,
+        loopId: true,
+        errorDetalle: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    })
+    return reply.send(solicitudes)
+  })
+
   // ── POST /operador/solicitudes ────────────────────────────────────────────
   // Creates solicitud and asks the FIRST clarifying question via LLM.
   fastify.post<{
@@ -78,7 +101,7 @@ const operadorRoutes: FastifyPluginAsync = async (fastify) => {
         select: { id: true },
       })
       await encolarSolicitud(solicitud.id)
-      return reply.status(202).send({ id: solicitud.id, estado: 'pendiente', pregunta: null })
+      return reply.status(202).send({ id: solicitud.id, estado: 'pendiente', respuesta: null })
     }
 
     const isJson = primeraPregunta.startsWith('{')
@@ -107,7 +130,7 @@ const operadorRoutes: FastifyPluginAsync = async (fastify) => {
         select: { id: true },
       })
       await encolarSolicitud(solicitud.id)
-      return reply.status(202).send({ id: solicitud.id, estado: 'procesando', pregunta: null })
+      return reply.status(202).send({ id: solicitud.id, estado: 'procesando', respuesta: null })
     }
 
     // Normal path: create solicitud awaiting first user reply
@@ -121,7 +144,7 @@ const operadorRoutes: FastifyPluginAsync = async (fastify) => {
       },
       select: { id: true },
     })
-    return reply.status(202).send({ id: solicitud.id, estado: 'esperando_respuesta', pregunta: primeraPregunta })
+    return reply.status(202).send({ id: solicitud.id, estado: 'esperando_respuesta', respuesta: primeraPregunta })
   })
 
   // ── GET /operador/solicitudes/:id ─────────────────────────────────────────
